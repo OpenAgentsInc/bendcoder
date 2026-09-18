@@ -1,8 +1,21 @@
-// Subprocess execution and file I/O primitives for Bend2
+// Subprocess execution and file I/O primitives for Bend2.
+//
+// The Read / Write / Edit algorithms live in tools_c.h, shared with
+// bender_agent.c; this file is only the Bend FFI wrapping around them.
+//
+// The boundary is string-only, matching the other laws in the project: numeric
+// arguments (a read's offset and limit, an edit's replace_all flag) arrive as
+// decimal or "true"/"false" text and are parsed here, which keeps every law a
+// plain `String -> ... -> IO(String)`.
+#define _GNU_SOURCE
+#define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <stdbool.h>
+
+#include "tools_c.h"
 
 typedef struct {
   char* data;
@@ -13,7 +26,6 @@ typedef struct {
 // 1. command_run: execute shell command and capture combined stdout/stderr
 // -----------------------------------------------------------------------------
 static void command_run_worker(IoWork* w) {
-  // Command string is in w->data
   char* cmd = w->data;
   if (!cmd || strlen(cmd) == 0) {
     w->data = strdup("");
@@ -21,8 +33,7 @@ static void command_run_worker(IoWork* w) {
     return;
   }
 
-  // Redirect stderr to stdout so agent can read build/runtime errors
-  char full_cmd[2048];
+  char full_cmd[4096];
   snprintf(full_cmd, sizeof(full_cmd), "%s 2>&1", cmd);
 
   FILE* pipe = popen(full_cmd, "r");
@@ -72,55 +83,37 @@ static void __attribute__((constructor)) command_run_use(void) {
 }
 
 // -----------------------------------------------------------------------------
-// 2. sys_read_file: read full file content into a String
+// Shared packing: every tool below returns one heap string.
 // -----------------------------------------------------------------------------
-static void sys_read_file_worker(IoWork* w) {
-  char* path = w->data;
-  FILE* f = fopen(path, "rb");
-  free(path);
-
-  if (!f) {
-    w->data = strdup("");
-    w->size = 0;
-    return;
-  }
-
-  fseek(f, 0, SEEK_END);
-  long sz = ftell(f);
-  fseek(f, 0, SEEK_SET);
-
-  if (sz <= 0) {
-    fclose(f);
-    w->data = strdup("");
-    w->size = 0;
-    return;
-  }
-
-  char* content = malloc(sz + 1);
-  if (!content) {
-    fclose(f);
-    w->data = strdup("");
-    w->size = 0;
-    return;
-  }
-
-  size_t read_bytes = fread(content, 1, sz, f);
-  content[read_bytes] = '\0';
-  fclose(f);
-
-  w->data = content;
-  w->size = read_bytes;
-}
-
-static Term sys_read_file_pack(Env e, IoWork* w) {
+static Term sys_tool_pack(Env e, IoWork* w) {
   Term str = io_str(e, w->data, w->size);
   free(w->data);
   return str;
 }
 
+// -----------------------------------------------------------------------------
+// 2. sys_read_file: read full raw file content into a String
+// sys.read_file(path: String) -> IO(String)
+// Unnumbered, for feeding a file straight to a model. Read uses sys_read_lines.
+// -----------------------------------------------------------------------------
+static void sys_read_file_worker(IoWork* w) {
+  char* path = w->data;
+  size_t len = 0;
+  char* content = bender_slurp(path, &len);
+  free(path);
+
+  if (!content) {
+    w->data = strdup("");
+    w->size = 0;
+    return;
+  }
+  w->data = content;
+  w->size = len;
+}
+
 Term sys_read_file_run(Env e, Term* f, IoWork* w) {
   w->data = io_cstr(e, f[0], &w->size);
-  return io_work(w, sys_read_file_worker, sys_read_file_pack);
+  return io_work(w, sys_read_file_worker, sys_tool_pack);
 }
 
 static void __attribute__((constructor)) sys_read_file_use(void) {
@@ -128,7 +121,46 @@ static void __attribute__((constructor)) sys_read_file_use(void) {
 }
 
 // -----------------------------------------------------------------------------
-// 3. sys_write_file: overwrite file content with string
+// 3. sys_read_lines: 1-indexed numbered read with offset and limit
+// sys.read_lines(path: String, offset: String, limit: String) -> IO(String)
+// offset "0" or "1" both start at line 1; limit "0" reads to end of file.
+// -----------------------------------------------------------------------------
+typedef struct {
+  char* path;
+  long offset;
+  long limit;
+} ReadLinesWorkData;
+
+static void sys_read_lines_worker(IoWork* w) {
+  ReadLinesWorkData* d = (ReadLinesWorkData*)w->data;
+  char* result = tool_read(d->path, d->offset, d->limit);
+  free(d->path);
+  free(d);
+  w->data = result;
+  w->size = strlen(result);
+}
+
+Term sys_read_lines_run(Env e, Term* f, IoWork* w) {
+  ReadLinesWorkData* d = malloc(sizeof(ReadLinesWorkData));
+  uint64_t l0 = 0, l1 = 0, l2 = 0;
+  d->path = io_cstr(e, f[0], &l0);
+  char* offset_str = io_cstr(e, f[1], &l1);
+  char* limit_str = io_cstr(e, f[2], &l2);
+  d->offset = strtol(offset_str, NULL, 10);
+  d->limit = strtol(limit_str, NULL, 10);
+  free(offset_str);
+  free(limit_str);
+  w->data = (char*)d;
+  return io_work(w, sys_read_lines_worker, sys_tool_pack);
+}
+
+static void __attribute__((constructor)) sys_read_lines_use(void) {
+  io_eff(CID_SYS_READ_LINES, sys_read_lines_run, 0);
+}
+
+// -----------------------------------------------------------------------------
+// 4. sys_write_file: write / overwrite a file, creating parent directories
+// sys.write_file(path: String, content: String) -> IO(String)
 // -----------------------------------------------------------------------------
 typedef struct {
   char* path;
@@ -138,18 +170,12 @@ typedef struct {
 
 static void sys_write_file_worker(IoWork* w) {
   WriteWorkData* d = (WriteWorkData*)w->data;
-  FILE* f = fopen(d->path, "wb");
-  if (f) {
-    fwrite(d->content, 1, d->content_len, f);
-    fclose(f);
-  }
+  char* result = tool_write(d->path, d->content, d->content_len);
   free(d->path);
   free(d->content);
   free(d);
-}
-
-static Term sys_write_file_pack(Env e, IoWork* w) {
-  return term_pak(CID_UNIT, 0);
+  w->data = result;
+  w->size = strlen(result);
 }
 
 Term sys_write_file_run(Env e, Term* f, IoWork* w) {
@@ -160,9 +186,49 @@ Term sys_write_file_run(Env e, Term* f, IoWork* w) {
   d->content = io_cstr(e, f[1], &cont_len);
   d->content_len = cont_len;
   w->data = (char*)d;
-  return io_work(w, sys_write_file_worker, sys_write_file_pack);
+  return io_work(w, sys_write_file_worker, sys_tool_pack);
 }
 
 static void __attribute__((constructor)) sys_write_file_use(void) {
   io_eff(CID_SYS_WRITE_FILE, sys_write_file_run, 0);
+}
+
+// -----------------------------------------------------------------------------
+// 5. sys_edit_file: exact-match search and replace
+// sys.edit_file(path, old_str, new_str, replace_all: String) -> IO(String)
+// replace_all is "true" or "false"; anything else reads as false.
+// -----------------------------------------------------------------------------
+typedef struct {
+  char* path;
+  char* old_str;
+  char* new_str;
+  int replace_all;
+} EditWorkData;
+
+static void sys_edit_file_worker(IoWork* w) {
+  EditWorkData* d = (EditWorkData*)w->data;
+  char* result = tool_edit(d->path, d->old_str, d->new_str, d->replace_all);
+  free(d->path);
+  free(d->old_str);
+  free(d->new_str);
+  free(d);
+  w->data = result;
+  w->size = strlen(result);
+}
+
+Term sys_edit_file_run(Env e, Term* f, IoWork* w) {
+  EditWorkData* d = malloc(sizeof(EditWorkData));
+  uint64_t l0 = 0, l1 = 0, l2 = 0, l3 = 0;
+  d->path = io_cstr(e, f[0], &l0);
+  d->old_str = io_cstr(e, f[1], &l1);
+  d->new_str = io_cstr(e, f[2], &l2);
+  char* flag = io_cstr(e, f[3], &l3);
+  d->replace_all = (strcmp(flag, "true") == 0);
+  free(flag);
+  w->data = (char*)d;
+  return io_work(w, sys_edit_file_worker, sys_tool_pack);
+}
+
+static void __attribute__((constructor)) sys_edit_file_use(void) {
+  io_eff(CID_SYS_EDIT_FILE, sys_edit_file_run, 0);
 }

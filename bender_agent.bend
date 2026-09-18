@@ -37,9 +37,21 @@ def sys.read_file(path):
   import "./sys_c.c"
 
 law sys.write_file:
-  String -> String -> IO(Unit)
+  String -> String -> IO(String)
 
 def sys.write_file(path, content):
+  import "./sys_c.c"
+
+law sys.read_lines:
+  String -> String -> String -> IO(String)
+
+def sys.read_lines(path, offset, limit):
+  import "./sys_c.c"
+
+law sys.edit_file:
+  String -> String -> String -> String -> IO(String)
+
+def sys.edit_file(path, old_str, new_str, replace_all):
   import "./sys_c.c"
 
 law extract.choice:

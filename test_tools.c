@@ -1,0 +1,72 @@
+// Exercises the agent's own helpers by including the runtime with main renamed.
+#define main bender_main
+#include "bender_agent.c"
+#undef main
+
+#include <assert.h>
+
+static int fails = 0;
+static void check(int cond, const char* what) {
+  printf("%s %s\n", cond ? "ok  " : "FAIL", what);
+  if (!cond) fails++;
+}
+
+int main(void) {
+  system("rm -rf /tmp/bender_tool_test");
+
+  const char* block =
+    "<<<PATH>>>\nsrc/a.c\n<<<OLD>>>\nint x = 1;\n  int y = 2;\n<<<NEW>>>\nint x = 42;\n<<<END>>>\n";
+  char* path = slice_section(block, "<<<PATH>>>", "<<<OLD>>>");
+  char* oldv = slice_section(block, "<<<OLD>>>", "<<<NEW>>>");
+  char* newv = slice_section(block, "<<<NEW>>>", "<<<END>>>");
+  check(path && strcmp(path, "src/a.c") == 0, "slice PATH");
+  check(oldv && strcmp(oldv, "int x = 1;\n  int y = 2;") == 0, "slice OLD keeps interior newline+indent");
+  check(newv && strcmp(newv, "int x = 42;") == 0, "slice NEW");
+  free(path); free(oldv); free(newv);
+
+  check(slice_section("<<<PATH>>>\nx\n", "<<<PATH>>>", "<<<OLD>>>") == NULL, "missing close sentinel -> NULL");
+
+  // Empty OLD is how a new file is requested: it must parse, not vanish.
+  char* empty = slice_section("<<<OLD>>>\n<<<NEW>>>\n", "<<<OLD>>>", "<<<NEW>>>");
+  check(empty && empty[0] == '\0', "empty OLD section parses as empty string");
+  free(empty);
+
+  check(path_is_in_repo("sys_c.c"), "relative path allowed");
+  check(!path_is_in_repo("/etc/passwd"), "absolute path refused");
+  check(!path_is_in_repo("../secrets"), "parent traversal refused");
+  check(!path_is_in_repo("a/../../b"), "embedded traversal refused");
+  check(!path_is_in_repo(""), "empty path refused");
+
+  char state[256];
+  strcpy(state, "start");
+  char big[9000];
+  memset(big, 'z', sizeof(big) - 1);
+  big[sizeof(big) - 1] = '\0';
+  state_append(state, sizeof(state), "Big", big);
+  check(strlen(state) < sizeof(state), "state_append never overruns the buffer");
+  check(strncmp(state, "start", 5) == 0, "state_append preserves prior state");
+
+  // The file tools themselves, round-tripped on a scratch file.
+  const char* tmp = "/tmp/bender_tool_test/nested/f.txt";
+  char* w = tool_write(tmp, "one\ntwo\nthree\n", 14);
+  check(strncmp(w, "File created", 12) == 0, "tool_write creates nested dirs");
+  free(w);
+  char* r = tool_read(tmp, 2, 1);
+  check(r && strcmp(r, "2\ttwo") == 0, "tool_read honours 1-indexed offset+limit");
+  free(r);
+  char* e = tool_edit(tmp, "two", "TWO", 0);
+  check(strncmp(e, "The file", 8) == 0, "tool_edit applies a unique match");
+  free(e);
+  char* e2 = tool_edit(tmp, "nope", "x", 0);
+  check(strncmp(e2, "error:", 6) == 0, "tool_edit reports a missing match as an error");
+  free(e2);
+  char* e3 = tool_edit(tmp, "one", "one", 0);
+  check(strncmp(e3, "error:", 6) == 0, "tool_edit refuses identical old/new");
+  free(e3);
+  char* r2 = tool_read(tmp, 1, 0);
+  check(r2 && strcmp(r2, "1\tone\n2\tTWO\n3\tthree\n4\t") == 0, "file content after edit");
+  free(r2);
+
+  printf("\n%d failure(s)\n", fails);
+  return fails != 0;
+}

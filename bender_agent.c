@@ -6,6 +6,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/wait.h>
+
+// Read / Write / Edit, shared with the Bend FFI layer in sys_c.c.
+#include "tools_c.h"
 
 #define ANSI_CYAN    "\x1b[36m"
 #define ANSI_GREEN   "\x1b[32m"
@@ -21,24 +25,11 @@ static void render_banner(void) {
   printf("%s================================================================================%s\n", ANSI_CYAN, ANSI_RESET);
 }
 
-// Low-level helper: read file to string
-static char* read_file_str(const char* path) {
-  FILE* f = fopen(path, "rb");
-  if (!f) return strdup("");
-  fseek(f, 0, SEEK_END);
-  long sz = ftell(f);
-  fseek(f, 0, SEEK_SET);
-  if (sz <= 0) { fclose(f); return strdup(""); }
-  char* buf = malloc(sz + 1);
-  if (!buf) { fclose(f); return strdup(""); }
-  size_t r = fread(buf, 1, sz, f);
-  buf[r] = '\0';
-  fclose(f);
-  return buf;
-}
-
-// Low-level helper: execute shell command and capture combined stdout/stderr
-static char* exec_cmd(const char* cmd) {
+// Low-level helper: execute shell command and capture combined stdout/stderr.
+// *status, when given, receives the command's exit code so a caller can tell a
+// clean build from a failing one without reading the output.
+static char* exec_cmd_status(const char* cmd, int* status) {
+  if (status) *status = -1;
   char full_cmd[4096];
   snprintf(full_cmd, sizeof(full_cmd), "%s 2>&1", cmd);
   FILE* p = popen(full_cmd, "r");
@@ -57,8 +48,13 @@ static char* exec_cmd(const char* cmd) {
     len += bytes;
     out[len] = '\0';
   }
-  pclose(p);
+  int rc = pclose(p);
+  if (status) *status = (rc == -1) ? -1 : WEXITSTATUS(rc);
   return out;
+}
+
+static char* exec_cmd(const char* cmd) {
+  return exec_cmd_status(cmd, NULL);
 }
 
 // Read API key from env or file
@@ -109,9 +105,11 @@ static char* call_typesafe_classify(const char* state_str) {
       "\"criteria\":{"
         "\"read_code\":\"Inspect files, repository contents, or directory listings to gather needed facts\","
         "\"run_build\":\"Run a shell command, test, or build to inspect output\","
+        "\"apply_edit\":\"Change the code on disk: the fix is understood and a concrete edit to a known file can be written now\","
         "\"generate_answer\":\"Synthesize the final answer, explanation, or code using the LLM\","
         "\"task_complete\":\"The user request has already been completely answered and verified\"}},"
       "\"has_enough_info\":{\"type\":\"noul\",\"instructions\":\"Does the current state have enough concrete information to directly answer the user prompt?\"},"
+      "\"needs_code_change\":{\"type\":\"noul\",\"instructions\":\"Does satisfying this goal require editing files in this repository, rather than only answering in prose?\"},"
       "\"confidence_score\":{\"type\":\"score\",\"instructions\":\"How confident are we that we can answer or finish now?\","
       "\"criteria\":[\"0: Need more information from files or commands\",\"1: Partially understood\",\"2: Fully ready to answer or complete\"]}"
     "}}", pf);
@@ -133,7 +131,7 @@ static char* call_typesafe_classify(const char* state_str) {
 }
 
 // Call OpenRouter Chat Completion
-static char* call_openrouter_generate(const char* prompt) {
+static char* call_openrouter_with_system(const char* system_prompt, const char* prompt) {
   char key_buf[256];
   const char* key = get_api_key("OPENROUTER_API_KEY", ".env.openrouter", key_buf, sizeof(key_buf));
   if (!key) return strdup("{\"error\": \"Missing OpenRouter key\"}");
@@ -150,8 +148,17 @@ static char* call_openrouter_generate(const char* prompt) {
   FILE* pf = fdopen(fd, "w");
   if (pf) {
     fprintf(pf, "{\"model\":\"%s\",\"models\":[\"%s\",\"%s\"],\"messages\":["
-      "{\"role\":\"system\",\"content\":\"You are Bender, an expert AI engineer and systems developer built in Bend2. Answer questions accurately and directly based on the context.\"},"
-      "{\"role\":\"user\",\"content\":", model, model, backup);
+      "{\"role\":\"system\",\"content\":", model, model, backup);
+    fputc('\"', pf);
+    for (const char* p = system_prompt; *p; p++) {
+      if (*p == '\"') fputs("\\\"", pf);
+      else if (*p == '\\') fputs("\\\\", pf);
+      else if (*p == '\n') fputs("\\n", pf);
+      else if (*p == '\r') fputs("\\r", pf);
+      else if (*p == '\t') fputs("\\t", pf);
+      else fputc(*p, pf);
+    }
+    fputs("\"},{\"role\":\"user\",\"content\":", pf);
     fputc('\"', pf);
     for (const char* p = prompt; *p; p++) {
       if (*p == '\"') fputs("\\\"", pf);
@@ -177,6 +184,14 @@ static char* call_openrouter_generate(const char* prompt) {
   char* resp = exec_cmd(cmd);
   unlink(tmp_payload);
   return resp;
+}
+
+#define BENDER_ANSWER_SYSTEM \
+  "You are Bender, an expert AI engineer and systems developer built in Bend2. " \
+  "Answer questions accurately and directly based on the context."
+
+static char* call_openrouter_generate(const char* prompt) {
+  return call_openrouter_with_system(BENDER_ANSWER_SYSTEM, prompt);
 }
 
 static char* extract_choice(const char* json, const char* qid) {
@@ -243,6 +258,208 @@ static double extract_number(const char* json, const char* key) {
   return strtod(p, NULL);
 }
 
+// -----------------------------------------------------------------------------
+// Self-improvement loop: Read the code, draft an edit, apply it, verify, repeat
+// -----------------------------------------------------------------------------
+
+// Tool output is appended to the state verbatim, so a single large file could
+// crowd out everything the agent learned before it. Long output is clipped and
+// the clip is announced, keeping the state a readable running transcript.
+#define BENDER_MAX_TOOL_OUTPUT 6000
+
+static void state_append(char* state, size_t cap, const char* label, const char* body) {
+  size_t used = strlen(state);
+  if (used + 64 >= cap) return;
+  size_t room = cap - used - 1;
+  if (!body) body = "";
+  size_t body_len = strlen(body);
+  int clipped = 0;
+  if (body_len > BENDER_MAX_TOOL_OUTPUT) {
+    body_len = BENDER_MAX_TOOL_OUTPUT;
+    clipped = 1;
+  }
+  snprintf(state + used, room, "\n[%s]:\n%.*s%s\n", label,
+           (int)body_len, body, clipped ? "\n... (output truncated)" : "");
+}
+
+// The command that decides whether an edit was good. run_tests.sh covers the
+// file tools, the agent's helpers and the Bend side; BENDER_VERIFY_CMD points
+// the loop at a different suite when a goal calls for one.
+static const char* verify_command(void) {
+  const char* cmd = getenv("BENDER_VERIFY_CMD");
+  if (cmd && cmd[0]) return cmd;
+  return "./run_tests.sh";
+}
+
+// An agent editing its own repository must not wander out of it. Paths are
+// taken as relative to the repo root; anything absolute or climbing through
+// ".." is refused before it reaches the Edit tool.
+static int path_is_in_repo(const char* path) {
+  if (!path || !path[0]) return 0;
+  if (path[0] == '/' || path[0] == '~') return 0;
+  if (strstr(path, "..") != NULL) return 0;
+  return 1;
+}
+
+// The model answers with sentinel-delimited sections rather than JSON: an edit
+// carries exact source text, and sentinels survive quotes, braces and newlines
+// that a JSON string would have to escape (and routinely escapes wrongly).
+#define EDIT_FORMAT_SYSTEM \
+  "You are Bender, an autonomous coding agent improving your own repository.\n" \
+  "Reply with EXACTLY this form and nothing else — no prose, no code fences:\n" \
+  "<<<PATH>>>\n" \
+  "relative/path/from/repo/root\n" \
+  "<<<OLD>>>\n" \
+  "the exact existing text to replace, copied verbatim including indentation\n" \
+  "<<<NEW>>>\n" \
+  "the replacement text\n" \
+  "<<<END>>>\n" \
+  "The OLD block must appear EXACTLY ONCE in the file: include enough " \
+  "surrounding lines to make it unique. Leave the OLD block empty only when " \
+  "creating a new file. Make one small, self-contained change."
+
+// Returns the text between `open` and the next sentinel, or NULL when the
+// section is absent. The caller frees.
+static char* slice_section(const char* text, const char* open, const char* close) {
+  const char* start = strstr(text, open);
+  if (!start) return NULL;
+  start += strlen(open);
+  if (*start == '\n') start++;
+  const char* end = strstr(start, close);
+  if (!end) return NULL;
+  size_t len = (size_t)(end - start);
+  // The newline before the closing sentinel belongs to the delimiter, not to
+  // the content it terminates.
+  if (len > 0 && start[len - 1] == '\n') len--;
+  char* out = malloc(len + 1);
+  if (!out) return NULL;
+  memcpy(out, start, len);
+  out[len] = '\0';
+  return out;
+}
+
+static void trim_inplace(char* s) {
+  size_t len = strlen(s);
+  while (len > 0 && (s[len - 1] == '\n' || s[len - 1] == '\r' || s[len - 1] == ' ')) {
+    s[--len] = '\0';
+  }
+}
+
+// read_code: let the model name the file worth reading next, then serve it
+// with line numbers. The first read lists the repository instead, so the
+// choice is made against what is actually there.
+static void do_read_code(char* state, size_t cap, const char* goal, int read_phase) {
+  if (read_phase == 0) {
+    printf("📖 %sListing repository contents...%s\n", ANSI_MAGENTA, ANSI_RESET);
+    char* listing = exec_cmd("ls -1");
+    state_append(state, cap, "Repository files", listing);
+    free(listing);
+    char* readme = tool_read("README.md", 1, 80);
+    state_append(state, cap, "README.md (lines 1-80)", readme);
+    free(readme);
+    return;
+  }
+
+  char prompt[49152];
+  snprintf(prompt, sizeof(prompt),
+    "Goal: %s\n\n"
+    "Name the single file most worth reading next to advance this goal. "
+    "Reply with the relative path and nothing else.\n\nState so far:\n%s", goal, state);
+  char* resp = call_openrouter_with_system(
+    "You pick one file to read. Reply with a bare relative path, nothing else.",
+    prompt);
+  char* path = extract_content(resp);
+  free(resp);
+  trim_inplace(path);
+
+  if (!path_is_in_repo(path)) {
+    printf("🚫 %sRefusing to read outside the repository: '%s'%s\n", ANSI_YELLOW, path, ANSI_RESET);
+    state_append(state, cap, "Read refused", "The requested path is outside the repository.");
+    free(path);
+    return;
+  }
+
+  printf("📖 %sReading '%s'...%s\n", ANSI_MAGENTA, path, ANSI_RESET);
+  char* content = tool_read(path, 1, 200);
+  char label[512];
+  snprintf(label, sizeof(label), "%s (lines 1-200)", path);
+  state_append(state, cap, label, content);
+  free(content);
+  free(path);
+}
+
+// apply_edit: draft one edit, apply it with the Edit tool, verify, and roll the
+// file back when verification fails. The rollback is what lets the loop keep
+// running after a bad patch instead of leaving the repo broken.
+static void do_apply_edit(char* state, size_t cap, const char* goal) {
+  printf("🛠  %sDrafting an edit via OpenRouter...%s\n", ANSI_MAGENTA, ANSI_RESET);
+
+  char prompt[49152];
+  snprintf(prompt, sizeof(prompt), "Goal: %s\n\nState so far:\n%s", goal, state);
+  char* resp = call_openrouter_with_system(EDIT_FORMAT_SYSTEM, prompt);
+  char* block = extract_content(resp);
+  free(resp);
+
+  char* path = slice_section(block, "<<<PATH>>>", "<<<OLD>>>");
+  char* old_str = slice_section(block, "<<<OLD>>>", "<<<NEW>>>");
+  char* new_str = slice_section(block, "<<<NEW>>>", "<<<END>>>");
+  free(block);
+
+  if (!path || !old_str || !new_str) {
+    printf("⚠️  %sThe model did not return a well-formed edit block.%s\n", ANSI_YELLOW, ANSI_RESET);
+    state_append(state, cap, "Edit failed",
+      "The generated edit was not in the required <<<PATH>>>/<<<OLD>>>/<<<NEW>>>/<<<END>>> form.");
+    free(path); free(old_str); free(new_str);
+    return;
+  }
+  trim_inplace(path);
+
+  if (!path_is_in_repo(path)) {
+    printf("🚫 %sRefusing to edit outside the repository: '%s'%s\n", ANSI_YELLOW, path, ANSI_RESET);
+    state_append(state, cap, "Edit refused", "The requested path is outside the repository.");
+    free(path); free(old_str); free(new_str);
+    return;
+  }
+
+  // Snapshot before touching the file: verification decides whether it stays.
+  size_t backup_len = 0;
+  char* backup = bender_slurp(path, &backup_len);
+
+  printf("✏️  %sEditing '%s'...%s\n", ANSI_MAGENTA, path, ANSI_RESET);
+  char* result = tool_edit(path, old_str, new_str, 0);
+  printf("   %s\n", result);
+  state_append(state, cap, "Edit result", result);
+  int applied = strncmp(result, "error:", 6) != 0;
+  free(result);
+  free(old_str);
+  free(new_str);
+
+  if (!applied) {
+    free(backup);
+    free(path);
+    return;
+  }
+
+  printf("🔬 %sVerifying: %s%s\n", ANSI_MAGENTA, verify_command(), ANSI_RESET);
+  int status = -1;
+  char* out = exec_cmd_status(verify_command(), &status);
+  if (status == 0) {
+    printf("✅ %sVerification passed.%s\n", ANSI_GREEN, ANSI_RESET);
+    state_append(state, cap, "Verification passed", out);
+  } else {
+    printf("❌ %sVerification failed (exit %d) — rolling the file back.%s\n",
+           ANSI_YELLOW, status, ANSI_RESET);
+    if (backup) {
+      char* restore = tool_write(path, backup, backup_len);
+      free(restore);
+    }
+    state_append(state, cap, "Verification failed; edit rolled back", out);
+  }
+  free(out);
+  free(backup);
+  free(path);
+}
+
 int main(int argc, char** argv) {
   render_banner();
 
@@ -260,7 +477,15 @@ int main(int argc, char** argv) {
 
   char* final_answer = NULL;
   int read_phase = 0;
-  for (int step = 1; step <= 6; step++) {
+  // Read, edit, verify and retry does not fit in the six steps an answer takes.
+  // BENDER_MAX_STEPS raises the ceiling for a longer self-improvement run.
+  int max_steps = 6;
+  const char* steps_env = getenv("BENDER_MAX_STEPS");
+  if (steps_env && steps_env[0]) {
+    int parsed = atoi(steps_env);
+    if (parsed > 0) max_steps = parsed;
+  }
+  for (int step = 1; step <= max_steps; step++) {
     printf("%s─── Step %d: Jev Classification ──────────────────────────────────────────%s\n", ANSI_CYAN, step, ANSI_RESET);
 
     // 1. Classify
@@ -277,8 +502,15 @@ int main(int argc, char** argv) {
       decision = strdup("read_code");
     }
 
+    // An edit is only drafted against code that has actually been read, so an
+    // apply_edit chosen before the first read becomes that read instead.
+    if (strcmp(decision, "apply_edit") == 0 && read_phase == 0) {
+      free(decision);
+      decision = strdup("read_code");
+    }
+
     // Fallback: If we are on the penultimate or final step and still haven't generated an answer, force generate_answer.
-    if (step >= 5 && final_answer == NULL && strcmp(decision, "task_complete") != 0) {
+    if (step >= max_steps - 1 && final_answer == NULL && strcmp(decision, "task_complete") != 0) {
       free(decision);
       decision = strdup("generate_answer");
     }
@@ -294,39 +526,24 @@ int main(int argc, char** argv) {
       free(decision);
       break;
     } else if (strcmp(decision, "read_code") == 0) {
+      do_read_code(state, sizeof(state), goal_prompt, read_phase);
       read_phase++;
-      if (read_phase == 1) {
-        printf("📖 %sInspecting repository overview (README.md & hello.bend)...%s\n", ANSI_MAGENTA, ANSI_RESET);
-        char* readme = read_file_str("README.md");
-        char* hello = read_file_str("hello.bend");
-        size_t cur_len = strlen(state);
-        snprintf(state + cur_len, sizeof(state) - cur_len,
-          "\n[README.md]:\n%s\n[hello.bend]:\n%s", readme, hello);
-        free(readme);
-        free(hello);
-      } else {
-        printf("📖 %sInspecting core Bend code (agent_primitives.bend)...%s\n", ANSI_MAGENTA, ANSI_RESET);
-        char* prims = read_file_str("agent_primitives.bend");
-        size_t cur_len = strlen(state);
-        snprintf(state + cur_len, sizeof(state) - cur_len,
-          "\n[agent_primitives.bend]:\n%s", prims);
-        free(prims);
-      }
+    } else if (strcmp(decision, "apply_edit") == 0) {
+      do_apply_edit(state, sizeof(state), goal_prompt);
     } else if (strcmp(decision, "run_build") == 0) {
-      printf("⚡ %sRunning build check: 'bend hello.bend'...%s\n", ANSI_MAGENTA, ANSI_RESET);
-      char* out = exec_cmd("bend hello.bend");
-      size_t cur_len = strlen(state);
-      snprintf(state + cur_len, sizeof(state) - cur_len,
-        "\n[Command Output]: %s", out);
+      printf("⚡ %sRunning verification: %s%s\n", ANSI_MAGENTA, verify_command(), ANSI_RESET);
+      int status = -1;
+      char* out = exec_cmd_status(verify_command(), &status);
+      char label[64];
+      snprintf(label, sizeof(label), "Verification output (exit %d)", status);
+      state_append(state, sizeof(state), label, out);
       free(out);
     } else { // generate_answer
       printf("✨ %sSynthesizing answer via OpenRouter...%s\n", ANSI_MAGENTA, ANSI_RESET);
       char* g_resp = call_openrouter_generate(state);
       if (final_answer) free(final_answer);
       final_answer = extract_content(g_resp);
-      size_t cur_len = strlen(state);
-      snprintf(state + cur_len, sizeof(state) - cur_len,
-        "\n[Answer Generated]: %s\nStatus: Complete and verified.", final_answer);
+      state_append(state, sizeof(state), "Answer generated", final_answer);
       free(g_resp);
     }
 

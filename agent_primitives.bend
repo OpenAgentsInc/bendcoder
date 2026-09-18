@@ -45,10 +45,22 @@ law sys.read_file:
 def sys.read_file(path):
   import "./sys_c.c"
 
+law sys.read_lines:
+  String -> String -> String -> IO(String)
+
+def sys.read_lines(path, offset, limit):
+  import "./sys_c.c"
+
 law sys.write_file:
-  String -> String -> IO(Unit)
+  String -> String -> IO(String)
 
 def sys.write_file(path, content):
+  import "./sys_c.c"
+
+law sys.edit_file:
+  String -> String -> String -> String -> IO(String)
+
+def sys.edit_file(path, old_str, new_str, replace_all):
   import "./sys_c.c"
 
 # ------------------------------------------------------------------------------
@@ -167,8 +179,27 @@ def Generate(model: String, system_prompt: String, prompt: String) -> IO(String)
 def Exec(cmd: String) -> IO(String):
   command.run(cmd)
 
+# The FFI boundary is string-only, so the numeric offset/limit and the
+# replace_all flag are rendered as text on the way down and parsed in sys_c.c.
+
+# Raw whole-file contents, unnumbered: for handing a file straight to Generate.
 def ReadFile(path: String) -> IO(String):
   sys.read_file(path)
 
-def WriteFile(path: String, content: String) -> IO(Unit):
+# Read: 1-indexed lines rendered as "N\tline". offset is the first line to
+# emit (0 and 1 both mean line 1); limit 0 reads to the end of the file.
+def Read(path: String, offset: U32, limit: U32) -> IO(String):
+  sys.read_lines(path, U32.show(offset), U32.show(limit))
+
+# Write: full write / overwrite, creating any missing parent directories.
+# Returns a status line naming the file it created or updated.
+def WriteFile(path: String, content: String) -> IO(String):
   sys.write_file(path, content)
+
+# Edit: exact-match search and replace. An old_str matching more than once is
+# refused rather than guessed at unless replace_all is set.
+def EditFile(path: String, old_str: String, new_str: String) -> IO(String):
+  sys.edit_file(path, old_str, new_str, "false")
+
+def EditFileAll(path: String, old_str: String, new_str: String) -> IO(String):
+  sys.edit_file(path, old_str, new_str, "true")

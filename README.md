@@ -14,6 +14,79 @@ Rather than dozens of ad-hoc tools, brittle parsers, and fragile conversational 
 
 ---
 
+## File Tools: `Read`, `Write`, `Edit`
+
+The three tools Bender uses to change code are ported from [`~/coder`](https://github.com/OpenAgentsInc/coder)
+(`crates/coder-tools/src/cc/{read,write,edit}.rs`) into plain C in `tools_c.h`,
+shared by the Bend FFI layer (`sys_c.c`) and the agent runtime (`bender_agent.c`)
+so there is one implementation rather than one per caller.
+
+| Tool | Behaviour |
+| --- | --- |
+| `Read` | 1-indexed lines rendered as `N\tline`, with `offset` and `limit`. Refuses directories, warns on an empty file or an offset past EOF, and caps an unbounded read at 256 KB. |
+| `Write` | Full write / overwrite, creating any missing parent directories. Reports whether it created or updated the file. |
+| `Edit` | Exact-match `old_string` → `new_string`. An `old_string` matching more than once is refused with the match count unless `replace_all` is set; an empty `old_string` creates a new file. |
+
+From Bend (`agent_primitives.bend`):
+
+```python
+Read(path: String, offset: U32, limit: U32) -> IO(String)   # limit 0 = to EOF
+ReadFile(path: String) -> IO(String)                        # raw, unnumbered
+WriteFile(path: String, content: String) -> IO(String)
+EditFile(path: String, old_str: String, new_str: String) -> IO(String)
+EditFileAll(path: String, old_str: String, new_str: String) -> IO(String)
+Exec(cmd: String) -> IO(String)
+```
+
+The FFI boundary is string-only — offsets, limits and the `replace_all` flag
+travel as text and are parsed in `sys_c.c` — which keeps every law a plain
+`String -> ... -> IO(String)`.
+
+---
+
+## The Self-Improvement Loop
+
+`Classify` chooses among `read_code`, `run_build`, `apply_edit`,
+`generate_answer` and `task_complete`. `apply_edit` is the loop that lets
+Bender change its own code:
+
+```
+Classify -> Generate an edit -> Edit applies it -> verify -> pass? keep : roll back -> Classify
+```
+
+- **Generate an edit.** The model replies in a sentinel-delimited form
+  (`<<<PATH>>>` / `<<<OLD>>>` / `<<<NEW>>>` / `<<<END>>>`) rather than JSON,
+  because an edit carries exact source text and sentinels survive the quotes,
+  braces and newlines a JSON string has to escape.
+- **Verify.** `./run_tests.sh` by default; set `BENDER_VERIFY_CMD` to point the
+  loop at a different suite.
+- **Roll back.** The file is snapshotted before the edit and restored when
+  verification fails, so a bad patch never leaves the tree broken — the failure
+  goes back into the state and the next `Classify` round sees it.
+- **Stay in the repo.** Absolute paths and anything containing `..` are refused
+  before they reach the tools.
+
+`read_code` lists the repository on its first pass, then asks the model which
+file to read next and serves it with line numbers.
+
+`BENDER_MAX_STEPS` raises the step ceiling (default 6) for a longer run.
+
+```bash
+BENDER_MAX_STEPS=8 ./run_bender.sh "Add a greet_bender function to hello.bend, keeping main working."
+```
+
+### Tests
+
+```bash
+./run_tests.sh
+```
+
+Covers the file tools, the agent's edit-block parser and path guard, and checks
+that the C runtime compiles and Bend still runs. This is also the loop's default
+verification target.
+
+---
+
 ## Autonomous Agent Loop & Terminal UI
 
 Bender runs an autonomous decision loop with a live terminal UI:
