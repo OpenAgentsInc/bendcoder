@@ -14,6 +14,25 @@ Rather than dozens of ad-hoc tools, brittle parsers, and fragile conversational 
 
 ---
 
+## Bend Constraints (Bend 2.0.5)
+
+Every constraint below was verified against Bend 2.0.5 by a failed compile, not
+read off the guide — several are not in the guide at all. The section sits this
+early on purpose: `do_read_code` serves README lines 1-80 on the first pass, so
+this is the context the agent has before it edits Bend.
+
+- **Affine by default** – `+x` marks a reusable `Data` parameter or match field.
+- **Match restrictions** – a `match` scrutinizes only parameters and fields, never a computed value. A `let` before a `match` on a parameter is rejected the same way, which is stronger than the error message suggests.
+- **Multi‑scrutinee order** – `match a b:` follows binder order.
+- **No forward references** – top‑level mutual recursion is impossible; this is the mechanism by which totality is enforced.
+- **Self‑call shrinking** – a self-call must pass each argument unchanged until one structurally shrinks, and this holds inside `do IO` too: a `step(state ++ "x")` tail call is rejected identically. An agent loop cannot be written in Bend without a shrinking argument.
+- **No `argv`** – Base has `IO.get_env` and nothing else, so a goal arrives through the environment.
+- **Qualified constructors** – constructors of an imported type must be qualified in patterns, e.g., `case A.ReadCode{}:`. Not in the guide.
+- **FFI law handling** – FFI is `law` + `def … import "./file.c"`, and Bend emits `#define CID_<NAME>` only for laws reachable from `main` — hence the `#ifdef` guards in `sys_c.c` (#5).
+- **Typed let in `do`** – inside a `do` block a `let` needs its annotation: `x : String = v`, not `x = v`.
+
+---
+
 ## File Tools: `Read`, `Write`, `Edit`
 
 The three tools Bender uses to change code are ported from [`~/coder`](https://github.com/OpenAgentsInc/coder)
@@ -77,20 +96,6 @@ string, which is how the agent finds the file that matters instead of guessing
 a name.
 
 `BENDER_MAX_STEPS` raises the step ceiling (default 6) for a longer run.
-
-## Bend Constraints (Bend 2.0.5)
-
-- **Affine by default** – `+x` marks a reusable `Data` parameter or match field.
-- **Match restrictions** – `match` only inspects parameters and fields, never computed values. A `let` before a `match` on a parameter is rejected.
-- **Multi‑scrutinee order** – `match a b:` follows the binder order of `a` then `b`.
-- **No forward references** – top‑level mutual recursion is impossible; this enforces totality.
-- **Self‑call shrinking** – a recursive call must pass each argument unchanged until one structurally shrinks, and this rule also applies inside `do IO` blocks (e.g., `step(state ++ "x")` is rejected).
-- **No `argv`** – use `IO.get_env` for input; the goal arrives via the environment.
-- **Qualified constructors** – when pattern‑matching on an imported type, constructors must be qualified, e.g., `case A.ReadCode{}`.
-- **FFI law handling** – `law` + `def … import "./file.c"` emits `#define CID_<NAME>` only for laws reachable from `main`; see the `#ifdef` guards in `sys_c.c`.
-- **Typed let in `do`** – inside a `do` block a `let` requires an explicit type annotation: `x : String = v`.
-
-These constraints are important for the agent to avoid repeated compilation failures.
 
 ```bash
 BENDER_MAX_STEPS=8 ./run_bender.sh "Add a greet_bender function to hello.bend, keeping main working."
