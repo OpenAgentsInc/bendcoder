@@ -1,50 +1,19 @@
 import Base
 import ./agent_primitives.bend as P
 import ./action.bend as A
-# guard.bend holds in_repo, the path check apply_edit makes; the laws about it
-# are proved in PROOF.bend, which the suite runs separately -- a module with
-# unfilled laws cannot be imported by a program.
-import ./guard.bend as G
+import ./parse.bend as E
+import ./ui.bend as U
 import ./selector.bend as S
 
 # ==============================================================================
-# Bender: Autonomous Coding Agent Loop & Terminal UI
+# Bender: Autonomous Coding Agent Loop
 # ==============================================================================
-# Classify, Generate, the question and answer types and the file tools all
-# live in agent_primitives.bend and are reached here through `P.`; this file
-# is only the loop and the terminal UI built on top of them.
+# Classify, Generate, the question and answer types and the file tools live in
+# agent_primitives.bend (`P.`); the action space in action.bend (`A.`); the
+# sentinel edit parser and the Edit/ToolResult types in parse.bend (`E.`);
+# colours and rendering in ui.bend (`U.`); the question set, thresholds and
+# route table in selector.bend (`S.`). This file is the loop and nothing else.
 # ==============================================================================
-
-# ------------------------------------------------------------------------------
-# Terminal UI Formatting Helpers
-# ------------------------------------------------------------------------------
-def esc() -> String:
-  Char.show(Chr{27})
-
-def color_cyan(s: String) -> String:
-  esc() ++ "[36m" ++ s ++ esc() ++ "[0m"
-
-def color_green(s: String) -> String:
-  esc() ++ "[32m" ++ s ++ esc() ++ "[0m"
-
-def color_yellow(s: String) -> String:
-  esc() ++ "[33m" ++ s ++ esc() ++ "[0m"
-
-def color_magenta(s: String) -> String:
-  esc() ++ "[35m" ++ s ++ esc() ++ "[0m"
-
-def color_bold(s: String) -> String:
-  esc() ++ "[1m" ++ s ++ esc() ++ "[0m"
-
-def rule() -> String:
-  "--------------------------------------------------------------------------------"
-
-def render_banner() -> IO(Unit):
-  do IO<Unit>:
-    u1 : Unit <- IO.print(color_cyan("================================================================================"))
-    u2 : Unit <- IO.print(color_bold("  [BENDER] Autonomous Coding Agent (Bend2 + TypeSafe + OpenRouter)"))
-    IO.print(color_cyan("================================================================================"))
-
 
 # ------------------------------------------------------------------------------
 # Autonomous Agent Loop
@@ -73,7 +42,7 @@ type Progress is Data:
 # arrives reusable (`+`); affine is the default and would reject the reuse.
 def report_misses(+label: String, +out: String, misses: U32) -> IO(Progress):
   do IO<Progress>:
-    u1 : Unit <- IO.print(color_yellow("   " ++ label))
+    u1 : Unit <- IO.print(U.color_yellow("   " ++ label))
     u2 : Unit <- IO.print("   " ++ out)
     IO.pure(Progress, Running{"\n[" ++ label ++ "]:\n" ++ out, misses})
 
@@ -111,7 +80,7 @@ def search_report(+pattern: String, +hits: String, prev: U32) -> IO(Progress):
 
 def search_with(+pattern: String, prev: U32) -> IO(Progress):
   do IO<Progress>:
-    u1 : Unit <- IO.print(color_magenta("[TOOL SEARCH] Searching for '") ++ pattern ++ color_magenta("' ..."))
+    u1 : Unit <- IO.print(U.color_magenta("[TOOL SEARCH] Searching for '") ++ pattern ++ U.color_magenta("' ..."))
     hits : String <- P.Grep(pattern, ".")
     search_report(pattern, hits, prev)
 
@@ -160,13 +129,13 @@ def report_verify(r: Result<&1, &1, U32 & String, String>) -> IO(Progress):
 
 def act_run_build() -> IO(Progress):
   do IO<Progress>:
-    u1 : Unit <- IO.print(color_magenta("[TOOL EXEC] Running verification: './run_tests.sh' ..."))
+    u1 : Unit <- IO.print(U.color_magenta("[TOOL EXEC] Running verification: './run_tests.sh' ..."))
     r : Result<&1, &1, U32 & String, String> <- P.Exec("./run_tests.sh")
     report_verify(r)
 
 def act_read_code() -> IO(Progress):
   do IO<Progress>:
-    u1 : Unit <- IO.print(color_magenta("[TOOL READ] Reading 'hello.bend' ..."))
+    u1 : Unit <- IO.print(U.color_magenta("[TOOL READ] Reading 'hello.bend' ..."))
     content : String <- P.Read("hello.bend", 1, 200)
     report("hello.bend (lines 1-200)", content)
 
@@ -184,13 +153,13 @@ def prepend_search_note(p: Progress) -> IO(Progress):
 # read in the C loop sends a repeatedly-missing search_code at read_code.
 def search_stuck_read() -> IO(Progress):
   do IO<Progress>:
-    u1 : Unit <- IO.print(color_yellow("   [SEARCH STUCK] search_code missed twice running; reading code instead."))
+    u1 : Unit <- IO.print(U.color_yellow("   [SEARCH STUCK] search_code missed twice running; reading code instead."))
     p : Progress <- act_read_code()
     prepend_search_note(p)
 
 def act_generate_answer(state: String) -> IO(Progress):
   do IO<Progress>:
-    u1 : Unit <- IO.print(color_magenta("[TOOL GENERATE] Calling LLM (OpenRouter) to generate code ..."))
+    u1 : Unit <- IO.print(U.color_magenta("[TOOL GENERATE] Calling LLM (OpenRouter) to generate code ..."))
     gen : String <- P.GenerateText(
       "openai/gpt-oss-120b:nitro",
       "You are Bender, an autonomous coding agent written in Bend2. Produce concise, direct code.",
@@ -205,114 +174,10 @@ def act_generate_answer(state: String) -> IO(Progress):
 # ReadFile for the snapshot, EditFile to apply, Exec to verify, WriteFile to
 # restore. Where the C applies a batch of hunks as a unit, this port takes one
 # <<<PATH>>>/<<<OLD>>>/<<<NEW>>> group per edit and refuses a reply carrying
-# more rather than silently applying a part of it.
-
-# A drafted edit as parsed from the model's reply: the three meaningful
-# states of what used to be three nullable char* slots. match on it is
-# exhaustive, so an unhandled refusal is a compile error. (Moves to
-# bender_parse.bend when #15 lands it with the parser.)
-type Edit is Data:
-  # the reply was not one <<<PATH>>>/<<<OLD>>>/<<<NEW>>>/<<<END>>> group
-  Malformed{why: String}
-  # well-formed, but the path failed the repository guard
-  Refused{path: String}
-  # all three sections present and the path passed the guard
-  Block{path: String, old_str: String, new_str: String}
-
-# after/before: the text following / preceding the first occurrence of pat,
-# or "" when pat never occurs. `here` carries "s starts with pat" because a
-# match cannot scrutinize the computed call — the same workaround
-# verify_failed uses, and the way Base itself writes String.contains.
-def after.go(s: String, +pat: String, here: Bool) -> String:
-  match s:
-    case SNil{}:
-      SNil{}
-    case SCon{+h, +t}:
-      match here:
-        case True{}:
-          String.drop(SCon{h, t}, String.length(pat))
-        case False{}:
-          after.go(t, pat, String.starts_with(t, pat))
-
-def after(+s: String, +pat: String) -> String:
-  after.go(s, pat, String.starts_with(s, pat))
-
-def before.go(s: String, +pat: String, here: Bool) -> String:
-  match s:
-    case SNil{}:
-      SNil{}
-    case SCon{+h, +t}:
-      match here:
-        case True{}:
-          SNil{}
-        case False{}:
-          SCon{h, before.go(t, pat, String.starts_with(t, pat))}
-
-def before(+s: String, +pat: String) -> String:
-  before.go(s, pat, String.starts_with(s, pat))
-
-# slice_range's bracket rule: the newline after the opening sentinel and the
-# one before the closer belong to the delimiters, not the content.
-def unbracket.lead(s: String) -> String:
-  match s:
-    case SNil{}:
-      SNil{}
-    case SCon{+h, +t}:
-      Bool.pick(String, Char.is_eq(h, '\n'), t, SCon{h, t})
-
-def unbracket(s: String) -> String:
-  String.reverse(unbracket.lead(String.reverse(unbracket.lead(s))))
-
-def section(+text: String, +open: String, +close: String) -> String:
-  unbracket(before(after(text, open), close))
-
-def edit_path(+reply: String) -> String:
-  String.trim(section(reply, "<<<PATH>>>", "<<<OLD>>>"))
-
-def edit_old_str(+reply: String) -> String:
-  section(reply, "<<<OLD>>>", "<<<NEW>>>")
-
-# The new_str closer is the earlier of <<<PATH>>> and <<<END>>>, the same
-# first_of rule bender_agent.c applies when a second hunk follows.
-def edit_new_str(+reply: String) -> String:
-  unbracket(before(before(after(reply, "<<<NEW>>>"), "<<<PATH>>>"), "<<<END>>>"))
-
-# One group needs all four sentinels; a second <<<PATH>>> before <<<END>>>
-# is a second hunk, which this loop refuses rather than half-applies.
-def edit_well_formed(+reply: String) -> Bool:
-  Bool.and(
-    String.contains(reply, "<<<PATH>>>"),
-    Bool.and(
-      String.contains(reply, "<<<OLD>>>"),
-      Bool.and(
-        String.contains(reply, "<<<NEW>>>"),
-        Bool.and(
-          String.contains(reply, "<<<END>>>"),
-          Bool.not(String.contains(before(after(reply, "<<<NEW>>>"), "<<<END>>>"), "<<<PATH>>>"))))))
-
-# The two computed checks arrive as Bools for the match, the same shape
-# parse_action.of already uses.
-def parse_edit.of(well_formed: Bool, path_ok: Bool, path: String, old_str: String, new_str: String) -> Edit:
-  match well_formed path_ok:
-    case False{} _:
-      Malformed{"the reply was not a single <<<PATH>>>/<<<OLD>>>/<<<NEW>>>/<<<END>>> group"}
-    case _ False{}:
-      Refused{path}
-    case _ _:
-      Block{path, old_str, new_str}
-
-def parse_edit(+reply: String) -> Edit:
-  parse_edit.of(
-    edit_well_formed(reply),
-    G.in_repo(edit_path(reply)),
-    edit_path(reply),
-    edit_old_str(reply),
-    edit_new_str(reply))
-
-# The sentinel-delimited edit format, ported from EDIT_FORMAT_SYSTEM but
-# narrowed to one group, matching what parse_edit accepts.
-def edit_format_system() -> String:
-  "You are Bender, an autonomous coding agent improving your own repository.\nReply with EXACTLY this form and nothing else -- no prose, no code fences:\n<<<PATH>>>\nrelative/path/from/repo/root\n<<<OLD>>>\nthe exact existing text to replace, copied verbatim including indentation\n<<<NEW>>>\nthe replacement text\n<<<END>>>\nThe OLD block must appear EXACTLY ONCE in its file: include enough surrounding lines to make it unique. Leave the OLD block empty only when creating a new file. Reply with a single group only. Make one small, self-contained change."
+# more rather than silently applying a part of it. The reply is parsed by
+# parse.bend into a typed Edit — Malformed, Refused or Block — so the match
+# in act_apply_edit below is exhaustive and a half-applied edit is
+# unrepresentable.
 
 # Verification decides whether the edit stays. `ok` is the Bool the caller
 # computes from Exec's Result — the same match-on-parameter split
@@ -325,7 +190,7 @@ def after_verify(ok: Bool, status: U32, +path: String, +backup: String, +out: St
       report("Verification passed; edit to " ++ path ++ " kept", out)
     case False{}:
       do IO<Progress>:
-        u1 : Unit <- IO.print(color_yellow("   Verification failed (exit " ++ U32.show(status) ++ ") -- rolling the edit back."))
+        u1 : Unit <- IO.print(U.color_yellow("   Verification failed (exit " ++ U32.show(status) ++ ") -- rolling the edit back."))
         rb : String <- P.WriteFile(path, backup)
         report("Verification failed; edit to " ++ path ++ " rolled back", out ++ "\n[Restore]: " ++ rb)
 
@@ -341,55 +206,56 @@ def verify_outcome(r: Result<&1, &1, U32 & String, String>, +path: String, +back
 # the command arrives + so it can be both announced and run.
 def run_verify(+cmd: String, +path: String, +backup: String) -> IO(Progress):
   do IO<Progress>:
-    u1 : Unit <- IO.print(color_magenta("   Verifying: " ++ cmd ++ " ..."))
+    u1 : Unit <- IO.print(U.color_magenta("   Verifying: " ++ cmd ++ " ..."))
     r : Result<&1, &1, U32 & String, String> <- P.Exec(cmd)
     verify_outcome(r, path, backup)
 
-def applied.of(failed: Bool, +res: String, +path: String, +backup: String) -> IO(Progress):
-  match failed:
-    case True{}:
+def applied.of(r: E.ToolResult, +path: String, +backup: String) -> IO(Progress):
+  match r:
+    case E.Err{+message}:
       do IO<Progress>:
         rb : String <- P.WriteFile(path, backup)
-        report("Edit refused by the Edit tool; snapshot restored", res ++ "\n[Restore]: " ++ rb)
-    case False{}:
+        report("Edit refused by the Edit tool; snapshot restored", message ++ "\n[Restore]: " ++ rb)
+    case E.Ok{+output}:
       do IO<Progress>:
-        u1 : Unit <- IO.print("   " ++ res)
+        u1 : Unit <- IO.print("   " ++ output)
         env : Result<&1, &1, U32 & String, String> <- IO.get_env("BENDER_VERIFY_CMD")
         run_verify(Result.default(&1, &1, U32 & String, String, env, "./run_tests.sh"), path, backup)
 
-# EditFile reports failure as "error: ..." text; the check is computed here
-# and matched in applied.of, because the match needs it as a parameter.
+# EditFile reports failure as "error: ..." text over the string-only FFI;
+# E.tool_result reads that convention into a ToolResult, so the match above
+# is over a type rather than a Bool the caller computed.
 def applied(+res: String, +path: String, +backup: String) -> IO(Progress):
-  applied.of(String.starts_with(res, "error:"), res, path, backup)
+  applied.of(E.tool_result(res), path, backup)
 
 # The snapshot is taken before the edit lands, so a refused apply or a
 # failed verify can put the file back the way the C loop does.
 def apply_block(+path: String, old_str: String, new_str: String) -> IO(Progress):
   do IO<Progress>:
-    u1 : Unit <- IO.print(color_magenta("   Editing '" ++ path ++ "' ..."))
+    u1 : Unit <- IO.print(U.color_magenta("   Editing '" ++ path ++ "' ..."))
     backup : String <- P.ReadFile(path)
     res : String <- P.EditFile(path, old_str, new_str)
     applied(res, path, backup)
 
-def act_apply_edit(e: Edit, +state: String) -> IO(Progress):
+def act_apply_edit(e: E.Edit, +state: String) -> IO(Progress):
   match e:
-    case Malformed{why}:
+    case E.Malformed{why}:
       report("Edit failed", why)
-    case Refused{path}:
+    case E.Refused{path}:
       report("Edit refused", "The requested path is outside the repository: " ++ path)
-    case Block{path, old_str, new_str}:
+    case E.Block{path, old_str, new_str}:
       apply_block(path, old_str, new_str)
 
 # do_apply_edit's Bend twin: draft the edit with the generation model, parse
 # the reply into an Edit, and let act_apply_edit's match handle the rest.
 def draft_apply_edit(+state: String) -> IO(Progress):
   do IO<Progress>:
-    u1 : Unit <- IO.print(color_magenta("[TOOL EDIT] Drafting an edit via OpenRouter ..."))
+    u1 : Unit <- IO.print(U.color_magenta("[TOOL EDIT] Drafting an edit via OpenRouter ..."))
     reply : String <- P.GenerateText(
       "openai/gpt-oss-120b:nitro",
-      edit_format_system(),
+      E.edit_format_system(),
       "State so far:\n" ++ state)
-    act_apply_edit(parse_edit(reply), state)
+    act_apply_edit(E.parse_edit(reply), state)
 
 # The action arrives already decoded: is_none keeps "none" (a real decision —
 # no listed action fits) distinct from None{} (a decision string no action
@@ -420,7 +286,7 @@ def dispatch_action(a: A.Action, state: String, misses: U32) -> IO(Progress):
 # mid-run, so an unconfirmed risky action is not run either.
 def reroute(+reason: String) -> IO(Progress):
   do IO<Progress>:
-    u1 : Unit <- IO.print(color_yellow("   [selector] " ++ reason ++ "; re-reading instead."))
+    u1 : Unit <- IO.print(U.color_yellow("   [selector] " ++ reason ++ "; re-reading instead."))
     act_read_code()
 
 # The selector's table decides the step: Act dispatches, the re-read rows take
@@ -461,8 +327,8 @@ def run_answers(+answers: S.LoopAnswers, state: String, misses: U32) -> IO(Progr
     case S.Ans{+action, +blocked, repeats, asked, risk, +progress}:
       do IO<Progress>:
         u1 : Unit <- IO.print(
-          color_yellow("[Classify Decision] ") ++ color_bold(answer_note(action)) ++
-          color_yellow(" (blocked " ++ answer_note(blocked) ++
+          U.color_yellow("[Classify Decision] ") ++ U.color_bold(answer_note(action)) ++
+          U.color_yellow(" (blocked " ++ answer_note(blocked) ++
           ", progress " ++ answer_note(progress) ++ ")"))
         u2 : Unit <- IO.print("")
         run_route(S.route(answers), state, misses)
@@ -478,17 +344,17 @@ def agent_step(fuel: Nat, phase: Progress, +step_num: U32, +state: String) -> IO
     # reported as complete, not as having run out of fuel.
     case f Finished{}:
       do IO<Unit>:
-        u1 : Unit <- IO.print(color_green("[TASK COMPLETED] Bender verified all goals are met!"))
-        IO.print(color_cyan("================================================================================"))
+        u1 : Unit <- IO.print(U.color_green("[TASK COMPLETED] Bender verified all goals are met!"))
+        IO.print(U.color_cyan("================================================================================"))
     case f Stalled{reason}:
-      IO.print(color_yellow("[STALLED] ") ++ reason)
+      IO.print(U.color_yellow("[STALLED] ") ++ reason)
     case 0n Running{output, _}:
-      IO.print(color_yellow("[HALT] Max step fuel reached. Pausing agent loop."))
+      IO.print(U.color_yellow("[HALT] Max step fuel reached. Pausing agent loop."))
     case 1n+p Running{+output, misses}:
       do IO<Unit>:
-        u1 : Unit <- IO.print(color_cyan(rule()))
-        u2 : Unit <- IO.print(color_bold("[STEP " ++ U32.show(step_num) ++ "] Evaluating State with Classify (TypeSafe System One)..."))
-        u3 : Unit <- IO.print(color_cyan(rule()))
+        u1 : Unit <- IO.print(U.color_cyan(U.rule()))
+        u2 : Unit <- IO.print(U.color_bold("[STEP " ++ U32.show(step_num) ++ "] Evaluating State with Classify (TypeSafe System One)..."))
+        u3 : Unit <- IO.print(U.color_cyan(U.rule()))
         +c_raw : String <- P.Classify(state ++ output, S.questions())
         action : P.Answer <- P.ParseAnswer(c_raw, "action")
         blocked : P.Answer <- P.ParseAnswer(c_raw, "is_blocked")
@@ -502,8 +368,8 @@ def agent_step(fuel: Nat, phase: Progress, +step_num: U32, +state: String) -> IO
 # The goal is both announced and seeded into the state, so it arrives reusable.
 def run_agent(fuel: Nat, +goal: String) -> IO(Unit):
   do IO<Unit>:
-    u1 : Unit <- render_banner()
-    u2 : Unit <- IO.print(color_bold("[GOAL] Initial Goal: ") ++ goal)
+    u1 : Unit <- U.render_banner()
+    u2 : Unit <- IO.print(U.color_bold("[GOAL] Initial Goal: ") ++ goal)
     u3 : Unit <- IO.print("")
     agent_step(fuel, Running{"", 0}, 1, goal)
 

@@ -144,8 +144,16 @@ see the `COVERED:` note under Verify above.
 
 `bender_agent.c` is the agent `run_bender.sh` builds and runs: it has the full
 loop, including `apply_edit` and rollback. `bender_agent.bend` is the same loop
-written in Bend, over the primitives in `agent_primitives.bend` — its
-`apply_edit` drafts one `<<<PATH>>>`/`<<<OLD>>>`/`<<<NEW>>>` group per edit
+written in Bend — and only the loop. The modules under it:
+
+- `agent_primitives.bend` — `Classify`, `Generate`, the file-tool laws (`P.`)
+- `action.bend` — the `Action` type, its parse/show and the round-trip law (`A.`)
+- `parse.bend` — the sentinel edit parser, `type Edit`, `type ToolResult` (`E.`)
+- `guard.bend` — the path guard; its laws are proved in `LAWS.bend`/`PROOF.bend`
+- `ui.bend` — colours and rendering (`U.`)
+- `selector.bend` — the question set, the thresholds, the route table (`S.`)
+
+Its `apply_edit` drafts one `<<<PATH>>>`/`<<<OLD>>>`/`<<<NEW>>>` group per edit
 (a reply carrying more is refused rather than half-applied), verifies with
 `BENDER_VERIFY_CMD`, and restores the `ReadFile` snapshot with `WriteFile`,
 so a file the edit created is left empty rather than removed:
