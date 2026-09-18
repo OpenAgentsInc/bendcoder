@@ -270,8 +270,20 @@ static double extract_number(const char* json, const char* key) {
 #define BENDER_MAX_TOOL_OUTPUT 6000
 
 static void state_append(char* state, size_t cap, const char* label, const char* body) {
+  static int truncation_marked = 0;
   size_t used = strlen(state);
-  if (used + 64 >= cap) return;
+  if (used + 64 >= cap) {
+    fprintf(stderr, "%s[warning] state buffer full, dropping further tool output%s\n", ANSI_YELLOW, ANSI_RESET);
+    if (!truncation_marked && used < cap - 1) {
+      const char *marker = "\n[...state truncated...]";
+      size_t mlen = strlen(marker);
+      size_t copy = (mlen < cap - used - 1) ? mlen : cap - used - 1;
+      memcpy(state + used, marker, copy);
+      state[used + copy] = '\0';
+      truncation_marked = 1;
+    }
+    return;
+  }
   size_t room = cap - used - 1;
   if (!body) body = "";
   size_t body_len = strlen(body);

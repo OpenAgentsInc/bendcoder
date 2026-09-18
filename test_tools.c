@@ -74,6 +74,19 @@ int main(void) {
   check(strlen(state) < sizeof(state), "state_append never overruns the buffer");
   check(strncmp(state, "start", 5) == 0, "state_append preserves prior state");
 
+  // A full buffer used to drop every later append in silence, so the agent
+  // kept reasoning over a transcript that had quietly stopped growing.
+  // Near-full rather than completely full: the marker needs somewhere to go,
+  // and a buffer with literally no room left correctly gets none.
+  char full[128];
+  memset(full, 'x', 100);
+  full[100] = '\0';
+  state_append(full, sizeof(full), "Ignored", "this cannot fit");
+  check(strstr(full, "state truncated") != NULL, "a full state says it was truncated");
+  size_t after_first = strlen(full);
+  state_append(full, sizeof(full), "Ignored", "nor can this");
+  check(strlen(full) == after_first, "the truncation marker is written only once");
+
   // The file tools themselves, round-tripped on a scratch file.
   const char* tmp = "/tmp/bender_tool_test/nested/f.txt";
   char* w = tool_write(tmp, "one\ntwo\nthree\n", 14);
