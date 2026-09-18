@@ -91,7 +91,7 @@ static char* call_typesafe_classify(const char* state_str) {
   if (fd < 0) return strdup("{}");
   FILE* pf = fdopen(fd, "w");
   if (pf) {
-    fprintf(pf, "{\"model\":\"jev-latest\",\"state\":");
+    fprintf(pf, "{\"model\":\"jev-1.13.0\",\"state\":");
     fputc('\"', pf);
     for (const char* p = state_str; *p; p++) {
       if (*p == '\"') fputs("\\\"", pf);
