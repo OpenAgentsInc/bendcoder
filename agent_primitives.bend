@@ -158,6 +158,35 @@ def build_classify_payload(state: String, qs: List<&2, Question>) -> String:
   "{\"state\":\"" ++ json_escape(state) ++ "\",\"model\":\"jev-latest\",\"questions\":{" ++ questions_to_json(qs) ++ "}}"
 
 # ------------------------------------------------------------------------------
+# High-Level Classify Answer Definitions
+# ------------------------------------------------------------------------------
+# The response half of the typed contract: Question is what is asked, Answer is
+# what comes back. One ParseAnswer per question id returns a typed value and
+# every consumer matches on it, so the positional strstr reads of #27 cannot be
+# written. Missing is #32's case — a failed request has no answer, and it used
+# to come back as "", which fell through dispatch reading as a decision.
+type Answer is Data:
+  # A Choice question answered: the label picked and the model's confidence.
+  Chosen{choice: String, confidence: F32}
+  # A Score question answered: the rubric level and the model's confidence.
+  Scored{score: F32, confidence: F32}
+  # A Noul question answered: a calibrated probability in [0.0, 1.0].
+  Nouled{probability: F32}
+  # The request failed, or the response held no usable answer for the id.
+  Missing{reason: String}
+
+# Finds one question's object in the response and packs it as the matching
+# Answer constructor; anything unrecognised, absent or failed is Missing.
+law extract.answer:
+  String -> String -> IO(Answer)
+
+def extract.answer(json, qid):
+  import "./json_parse_c.c"
+
+def ParseAnswer(json: String, qid: String) -> IO(Answer):
+  extract.answer(json, qid)
+
+# ------------------------------------------------------------------------------
 # The Classify Primitive
 # ------------------------------------------------------------------------------
 # Classify takes the current agent state and a list of typed questions.
@@ -181,6 +210,19 @@ def Generate(model: String, system_prompt: String, prompt: String) -> IO(String)
   do IO<String>:
     payload : String <- IO.pure(String, build_generate_payload(model, system_prompt, prompt))
     openrouter.post(payload)
+
+# Lifts the assistant's content out of the OpenAI-compatible chat envelope.
+law extract.generation:
+  String -> IO(String)
+
+def extract.generation(json):
+  import "./json_parse_c.c"
+
+# Generate, with the model's reply lifted out of the OpenRouter envelope.
+def GenerateText(model: String, system_prompt: String, prompt: String) -> IO(String):
+  do IO<String>:
+    raw : String <- Generate(model, system_prompt, prompt)
+    extract.generation(raw)
 
 # ------------------------------------------------------------------------------
 # The Tool Primitives

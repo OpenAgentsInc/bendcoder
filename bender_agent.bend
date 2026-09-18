@@ -4,31 +4,10 @@ import ./agent_primitives.bend as P
 # ==============================================================================
 # Bender: Autonomous Coding Agent Loop & Terminal UI
 # ==============================================================================
-# Classify, Generate, the question types and the file tools all live in
-# agent_primitives.bend and are reached here through `P.`; this file is only
-# the loop and the terminal UI built on top of them.
+# Classify, Generate, the question and answer types and the file tools all
+# live in agent_primitives.bend and are reached here through `P.`; this file
+# is only the loop and the terminal UI built on top of them.
 # ==============================================================================
-
-# ------------------------------------------------------------------------------
-# FFI Bindings: JSON field extraction
-# ------------------------------------------------------------------------------
-law extract.choice:
-  String -> String -> IO(String)
-
-def extract.choice(json, qid):
-  import "./json_parse_c.c"
-
-law extract.generation:
-  String -> IO(String)
-
-def extract.generation(json):
-  import "./json_parse_c.c"
-
-# Generate, with the model's reply lifted out of the OpenRouter envelope.
-def GenerateText(model: String, system_prompt: String, prompt: String) -> IO(String):
-  do IO<String>:
-    raw : String <- P.Generate(model, system_prompt, prompt)
-    extract.generation(raw)
 
 # ------------------------------------------------------------------------------
 # Terminal UI Formatting Helpers
@@ -143,7 +122,7 @@ def search_with(+pattern: String) -> IO(Progress):
 
 def act_search_code(state: String) -> IO(Progress):
   do IO<Progress>:
-    reply : String <- GenerateText(
+    reply : String <- P.GenerateText(
       "openai/gpt-oss-120b:nitro",
       "You choose one literal search string. Reply with the string alone, nothing else.",
       "State:\n" ++ state ++ "\nGive one literal string to search this repository for. Not a regular expression."
@@ -182,7 +161,7 @@ def act_read_code() -> IO(Progress):
 def act_generate_fix(state: String) -> IO(Progress):
   do IO<Progress>:
     u1 : Unit <- IO.print(color_magenta("[TOOL GENERATE] Calling LLM (OpenRouter) to generate code ..."))
-    gen : String <- GenerateText(
+    gen : String <- P.GenerateText(
       "openai/gpt-oss-120b:nitro",
       "You are Bender, an autonomous coding agent written in Bend2. Produce concise, direct code.",
       "State:\n" ++ state ++ "\nTask: Describe the single next change that would advance this goal."
@@ -217,19 +196,48 @@ def dispatch_action(
                     case False{}:
                       act_generate_fix(state)
 
-# `decision` is printed once and compared three times, hence `+`.
-def run_action(+decision: String, state: String) -> IO(Progress):
-  do IO<Progress>:
-    u1 : Unit <- IO.print(color_yellow("[Classify Decision] ") ++ color_bold(decision))
-    u2 : Unit <- IO.print("")
-    dispatch_action(
-      String.eq(decision, "task_complete"),
-      String.eq(decision, "none"),
-      String.eq(decision, "run_build"),
-      String.eq(decision, "read_code"),
-      String.eq(decision, "search_code"),
-      state
-    )
+# The short note an answer makes on the step line, for the questions that are
+# not the action itself. Missing reads as what it is — the request gave no
+# answer — not as a zero.
+def answer_note(a: P.Answer) -> String:
+  match a:
+    case P.Chosen{+choice, +confidence}:
+      choice ++ " (confidence " ++ F32.show(confidence) ++ ")"
+    case P.Scored{+score, +confidence}:
+      F32.show(score) ++ " (confidence " ++ F32.show(confidence) ++ ")"
+    case P.Nouled{+probability}:
+      F32.show(probability)
+    case P.Missing{+reason}:
+      "missing: " ++ reason
+
+# A match scrutinizes only a parameter, so the typed answers arrive here and
+# the action's own case decides the step. `choice` is printed once and
+# compared five times, hence `+`. A missing or mistyped answer stalls the loop
+# rather than falling through to a generation it never chose — #32's case.
+def run_answers(action: P.Answer, blocked: P.Answer, progress: P.Answer, state: String) -> IO(Progress):
+  match action:
+    case P.Chosen{+choice, +confidence}:
+      do IO<Progress>:
+        u1 : Unit <- IO.print(
+          color_yellow("[Classify Decision] ") ++ color_bold(choice) ++
+          color_yellow(" (confidence " ++ F32.show(confidence) ++
+          ", blocked " ++ answer_note(blocked) ++
+          ", progress " ++ answer_note(progress) ++ ")"))
+        u2 : Unit <- IO.print("")
+        dispatch_action(
+          String.eq(choice, "task_complete"),
+          String.eq(choice, "none"),
+          String.eq(choice, "run_build"),
+          String.eq(choice, "read_code"),
+          String.eq(choice, "search_code"),
+          state
+        )
+    case P.Missing{+reason}:
+      IO.pure(Progress, Stalled{"Classify returned no answer: " ++ reason})
+    case P.Scored{+score, +confidence}:
+      IO.pure(Progress, Stalled{"Classify answered 'action' with a score (" ++ F32.show(score) ++ "), not a choice."})
+    case P.Nouled{+probability}:
+      IO.pure(Progress, Stalled{"Classify answered 'action' with a noul (" ++ F32.show(probability) ++ "), not a choice."})
 
 # One round: fold the last tool output into the state, classify it, run the
 # chosen action, and recurse on the remaining fuel.
@@ -253,9 +261,11 @@ def agent_step(fuel: Nat, phase: Progress, +step_num: U32, +state: String) -> IO
         u1 : Unit <- IO.print(color_cyan(rule()))
         u2 : Unit <- IO.print(color_bold("[STEP " ++ U32.show(step_num) ++ "] Evaluating State with Classify (TypeSafe System One)..."))
         u3 : Unit <- IO.print(color_cyan(rule()))
-        c_raw : String <- P.Classify(state ++ output, loop_triage_questions())
-        decision : String <- extract.choice(c_raw, "action")
-        next : Progress <- run_action(decision, state ++ output)
+        +c_raw : String <- P.Classify(state ++ output, loop_triage_questions())
+        action : P.Answer <- P.ParseAnswer(c_raw, "action")
+        blocked : P.Answer <- P.ParseAnswer(c_raw, "is_blocked")
+        progress : P.Answer <- P.ParseAnswer(c_raw, "progress_score")
+        next : Progress <- run_answers(action, blocked, progress, state ++ output)
         agent_step(p, next, (step_num + 1 : U32), state ++ output)
 
 # The goal is both announced and seeded into the state, so it arrives reusable.
