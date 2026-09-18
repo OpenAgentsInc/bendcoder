@@ -82,8 +82,37 @@ BENDER_MAX_STEPS=8 ./run_bender.sh "Add a greet_bender function to hello.bend, k
 ```
 
 Covers the file tools, the agent's edit-block parser and path guard, and checks
-that the C runtime compiles and Bend still runs. This is also the loop's default
-verification target.
+that the C runtime compiles and both Bend programs still check and build. This
+is also the loop's default verification target.
+
+## Two agents
+
+`bender_agent.c` is the agent `run_bender.sh` builds and runs: it has the full
+loop, including `apply_edit` and rollback. `bender_agent.bend` is the same loop
+written in Bend, over the primitives in `agent_primitives.bend`:
+
+```bash
+bend bender_agent.bend -o bender_loop.c
+gcc -std=c11 -O1 -I. bender_loop.c -lpthread -lm -o bender_loop_bin
+./bender_loop_bin
+```
+
+Bend 2.0.5 shapes that loop in ways worth knowing before editing it:
+
+- **No forward references.** A name must be defined before it is used, so top-level
+  mutual recursion is impossible. The loop is therefore one self-recursive
+  `agent_step`; handlers return a `Progress` value and never call back into it.
+- **Self-calls must structurally decrease.** Arguments are read left to right and
+  each must be passed unchanged until one shrinks, which is why `fuel` leads the
+  parameter list.
+- **A `match` scrutinizes only parameters and fields**, never a computed value, and
+  a multi-scrutinee `match a b:` follows binder order. Equality tests are computed
+  by the caller and dispatched on as `Bool` parameters.
+- **Affine by default.** A value used more than once needs `+` on its parameter or
+  match field.
+
+In exchange the loop is total: `Progress` makes "keep going" and "finished"
+distinct states, and termination is checked rather than hoped for.
 
 ---
 

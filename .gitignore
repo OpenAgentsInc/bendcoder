@@ -5,3 +5,5 @@ call_typesafe.c
 agent_primitives.c
 agent_primitives_bin
 bender_agent_bin
+bender_loop.c
+bender_loop_bin

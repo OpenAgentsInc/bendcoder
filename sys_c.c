@@ -7,6 +7,11 @@
 // arguments (a read's offset and limit, an edit's replace_all flag) arrive as
 // decimal or "true"/"false" text and are parsed here, which keeps every law a
 // plain `String -> ... -> IO(String)`.
+//
+// Bend inlines this whole file once but only emits a CID_* for the laws a
+// program actually reaches from main, so each section is guarded on its own id.
+// Without the guards a program using some of these laws fails to compile on the
+// ones it left out.
 #define _GNU_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
@@ -22,6 +27,7 @@ typedef struct {
   size_t len;
 } SysIoBuffer;
 
+#ifdef CID_COMMAND_RUN
 // -----------------------------------------------------------------------------
 // 1. command_run: execute shell command and capture combined stdout/stderr
 // -----------------------------------------------------------------------------
@@ -81,16 +87,19 @@ Term command_run_run(Env e, Term* f, IoWork* w) {
 static void __attribute__((constructor)) command_run_use(void) {
   io_eff(CID_COMMAND_RUN, command_run_run, 0);
 }
+#endif  // CID_COMMAND_RUN
 
 // -----------------------------------------------------------------------------
 // Shared packing: every tool below returns one heap string.
 // -----------------------------------------------------------------------------
+__attribute__((unused))
 static Term sys_tool_pack(Env e, IoWork* w) {
   Term str = io_str(e, w->data, w->size);
   free(w->data);
   return str;
 }
 
+#ifdef CID_SYS_READ_FILE
 // -----------------------------------------------------------------------------
 // 2. sys_read_file: read full raw file content into a String
 // sys.read_file(path: String) -> IO(String)
@@ -119,7 +128,9 @@ Term sys_read_file_run(Env e, Term* f, IoWork* w) {
 static void __attribute__((constructor)) sys_read_file_use(void) {
   io_eff(CID_SYS_READ_FILE, sys_read_file_run, 0);
 }
+#endif  // CID_SYS_READ_FILE
 
+#ifdef CID_SYS_READ_LINES
 // -----------------------------------------------------------------------------
 // 3. sys_read_lines: 1-indexed numbered read with offset and limit
 // sys.read_lines(path: String, offset: String, limit: String) -> IO(String)
@@ -157,7 +168,9 @@ Term sys_read_lines_run(Env e, Term* f, IoWork* w) {
 static void __attribute__((constructor)) sys_read_lines_use(void) {
   io_eff(CID_SYS_READ_LINES, sys_read_lines_run, 0);
 }
+#endif  // CID_SYS_READ_LINES
 
+#ifdef CID_SYS_WRITE_FILE
 // -----------------------------------------------------------------------------
 // 4. sys_write_file: write / overwrite a file, creating parent directories
 // sys.write_file(path: String, content: String) -> IO(String)
@@ -192,7 +205,9 @@ Term sys_write_file_run(Env e, Term* f, IoWork* w) {
 static void __attribute__((constructor)) sys_write_file_use(void) {
   io_eff(CID_SYS_WRITE_FILE, sys_write_file_run, 0);
 }
+#endif  // CID_SYS_WRITE_FILE
 
+#ifdef CID_SYS_EDIT_FILE
 // -----------------------------------------------------------------------------
 // 5. sys_edit_file: exact-match search and replace
 // sys.edit_file(path, old_str, new_str, replace_all: String) -> IO(String)
@@ -232,3 +247,4 @@ Term sys_edit_file_run(Env e, Term* f, IoWork* w) {
 static void __attribute__((constructor)) sys_edit_file_use(void) {
   io_eff(CID_SYS_EDIT_FILE, sys_edit_file_run, 0);
 }
+#endif  // CID_SYS_EDIT_FILE
