@@ -105,6 +105,7 @@ static char* call_typesafe_classify(const char* state_str) {
       "\"action\":{\"type\":\"choice\",\"instructions\":\"Given the user question or goal and current state, what is the single next best action to take?\","
       "\"criteria\":{"
         "\"read_code\":\"Inspect files, repository contents, or directory listings to gather needed facts\","
+        "\"search_code\":\"Search the repository for a literal string to find which files are relevant\","
         "\"run_build\":\"Run a shell command, test, or build to inspect output\","
         "\"apply_edit\":\"Change the code on disk: the fix is understood and a concrete edit to a known file can be written now\","
         "\"generate_answer\":\"Synthesize the final answer, explanation, or code using the LLM\","
@@ -381,6 +382,33 @@ static char* extract_existing_path(const char* reply) {
   return best;
 }
 
+// The picker for a search pattern has the same leaked-reasoning problem as the
+// one for a path, but a pattern cannot be validated against the filesystem, so
+// the last non-empty line is taken and stripped of the quoting a model wraps it
+// in. Returns a malloc'd pattern, or NULL when there is nothing usable.
+static char* extract_search_pattern(const char* reply) {
+  const char* end = reply + strlen(reply);
+  while (end > reply && isspace((unsigned char)end[-1])) end--;
+  const char* start = end;
+  while (start > reply && start[-1] != '\n') start--;
+
+  size_t len = (size_t)(end - start);
+  if (len == 0) return NULL;
+  char* out = malloc(len + 1);
+  if (!out) return NULL;
+  memcpy(out, start, len);
+  out[len] = '\0';
+
+  // Strip one layer of the quoting a model puts around a literal.
+  char* p = out;
+  while (*p && strchr("`'\"", *p)) p++;
+  size_t plen = strlen(p);
+  while (plen > 0 && strchr("`'\".", p[plen - 1])) p[--plen] = '\0';
+  if (plen == 0) { free(out); return NULL; }
+  memmove(out, p, plen + 1);
+  return out;
+}
+
 // How far each file has been read, so a repeat request serves the next page
 // instead of the same first page again.
 #define BENDER_MAX_TRACKED_READS 32
@@ -427,6 +455,38 @@ static void describe_reads(char* out, size_t cap) {
         c->path, c->next_line - 1);
     }
   }
+}
+
+// search_code: ask for a literal string, then grep the repository for it. This
+// is how the agent finds the file that matters instead of guessing a name.
+static void do_search_code(char* state, size_t cap, const char* goal) {
+  char prompt[49152];
+  snprintf(prompt, sizeof(prompt),
+    "Goal: %s\n\n"
+    "Give one literal string to search this repository for — an identifier, a "
+    "message, a declaration. Not a regular expression. Reply with the string on "
+    "its own and nothing else.\n\nState so far:\n%s", goal, state);
+  char* resp = call_openrouter_with_system(
+    "You choose one literal search string. Reply with the string alone, nothing else.",
+    prompt);
+  char* reply = extract_content(resp);
+  free(resp);
+
+  char* pattern = extract_search_pattern(reply);
+  free(reply);
+  if (!pattern) {
+    printf("🚫 %sNo search pattern in the reply.%s\n", ANSI_YELLOW, ANSI_RESET);
+    state_append(state, cap, "Search failed", "The reply contained no search string.");
+    return;
+  }
+
+  printf("🔎 %sSearching the repository for '%s'...%s\n", ANSI_MAGENTA, pattern, ANSI_RESET);
+  char* hits = tool_grep(pattern, ".");
+  char label[512];
+  snprintf(label, sizeof(label), "Search for '%s'", pattern);
+  state_append(state, cap, label, hits);
+  free(hits);
+  free(pattern);
 }
 
 // read_code: let the model name the file worth reading next, then serve it
@@ -634,6 +694,8 @@ int main(int argc, char** argv) {
     } else if (strcmp(decision, "read_code") == 0) {
       do_read_code(state, sizeof(state), goal_prompt, read_phase);
       read_phase++;
+    } else if (strcmp(decision, "search_code") == 0) {
+      do_search_code(state, sizeof(state), goal_prompt);
     } else if (strcmp(decision, "apply_edit") == 0) {
       do_apply_edit(state, sizeof(state), goal_prompt);
     } else if (strcmp(decision, "run_build") == 0) {

@@ -63,6 +63,12 @@ law sys.edit_file:
 def sys.edit_file(path, old_str, new_str, replace_all):
   import "./sys_c.c"
 
+law sys.grep_file:
+  String -> String -> IO(String)
+
+def sys.grep_file(pattern, path):
+  import "./sys_c.c"
+
 # ------------------------------------------------------------------------------
 # JSON String escaping
 # ------------------------------------------------------------------------------
@@ -203,3 +209,8 @@ def EditFile(path: String, old_str: String, new_str: String) -> IO(String):
 
 def EditFileAll(path: String, old_str: String, new_str: String) -> IO(String):
   sys.edit_file(path, old_str, new_str, "true")
+
+# Grep: literal search. A file yields "N:line"; a directory is searched
+# recursively and yields "path:N:line", so a hit can be handed to Read or Edit.
+def Grep(pattern: String, path: String) -> IO(String):
+  sys.grep_file(pattern, path)

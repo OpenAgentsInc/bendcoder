@@ -25,7 +25,8 @@ so there is one implementation rather than one per caller.
 | --- | --- |
 | `Read` | 1-indexed lines rendered as `N\tline`, with `offset` and `limit`. Refuses directories, warns on an empty file or an offset past EOF, and caps an unbounded read at 256 KB. |
 | `Write` | Full write / overwrite, creating any missing parent directories. Reports whether it created or updated the file. |
-| `Edit` | Exact-match `old_string` → `new_string`. An `old_string` matching more than once is refused with the match count unless `replace_all` is set; an empty `old_string` creates a new file. |
+| `Edit` | Exact-match `old_string` → `new_string`. An `old_string` matching more than once is refused with the match count unless `replace_all` is set; an empty `old_string` creates a new file. When the exact string is absent, a candidate with Read's `N<tab>` line-number prefix stripped is tried, and used only if it resolves. |
+| `Grep` | Literal search. A file yields `N:line`; a directory is searched recursively and yields `path:N:line`, so a hit can be handed straight to Read or Edit. Binary files are skipped, long lines clipped, and the match count capped so a common pattern cannot swamp the state. |
 
 From Bend (`agent_primitives.bend`):
 
@@ -35,6 +36,7 @@ ReadFile(path: String) -> IO(String)                        # raw, unnumbered
 WriteFile(path: String, content: String) -> IO(String)
 EditFile(path: String, old_str: String, new_str: String) -> IO(String)
 EditFileAll(path: String, old_str: String, new_str: String) -> IO(String)
+Grep(pattern: String, path: String) -> IO(String)
 Exec(cmd: String) -> IO(String)
 ```
 
@@ -46,7 +48,7 @@ travel as text and are parsed in `sys_c.c` — which keeps every law a plain
 
 ## The Self-Improvement Loop
 
-`Classify` chooses among `read_code`, `run_build`, `apply_edit`,
+`Classify` chooses among `read_code`, `search_code`, `run_build`, `apply_edit`,
 `generate_answer` and `task_complete`. `apply_edit` is the loop that lets
 Bender change its own code:
 
@@ -67,7 +69,12 @@ Classify -> Generate an edit -> Edit applies it -> verify -> pass? keep : roll b
   before they reach the tools.
 
 `read_code` lists the repository on its first pass, then asks the model which
-file to read next and serves it with line numbers.
+file to read next and serves it with line numbers. Each file carries a cursor,
+so naming it again serves the next page rather than the first one, and a reply
+that leaks the model's reasoning is mined for a path that actually exists rather
+than taken at face value. `search_code` greps the repository for a literal
+string, which is how the agent finds the file that matters instead of guessing
+a name.
 
 `BENDER_MAX_STEPS` raises the step ceiling (default 6) for a longer run.
 
@@ -94,8 +101,11 @@ written in Bend, over the primitives in `agent_primitives.bend`:
 ```bash
 bend bender_agent.bend -o bender_loop.c
 gcc -std=c11 -O1 -I. bender_loop.c -lpthread -lm -o bender_loop_bin
-./bender_loop_bin
+BENDER_GOAL="Find where the grep match cap is set." ./bender_loop_bin
 ```
+
+Bend has no `argv` — Base offers only `IO.get_env` — so the Bend loop takes its
+goal from `BENDER_GOAL` where `bender_agent.c` takes it from `argv[1]`.
 
 Bend 2.0.5 shapes that loop in ways worth knowing before editing it:
 

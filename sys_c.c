@@ -248,3 +248,37 @@ static void __attribute__((constructor)) sys_edit_file_use(void) {
   io_eff(CID_SYS_EDIT_FILE, sys_edit_file_run, 0);
 }
 #endif  // CID_SYS_EDIT_FILE
+
+#ifdef CID_SYS_GREP_FILE
+// -----------------------------------------------------------------------------
+// 6. sys_grep_file: literal search of a file, or of a directory tree
+// sys.grep_file(pattern: String, path: String) -> IO(String)
+// -----------------------------------------------------------------------------
+typedef struct {
+  char* pattern;
+  char* path;
+} GrepWorkData;
+
+static void sys_grep_file_worker(IoWork* w) {
+  GrepWorkData* d = (GrepWorkData*)w->data;
+  char* result = tool_grep(d->pattern, d->path);
+  free(d->pattern);
+  free(d->path);
+  free(d);
+  w->data = result;
+  w->size = strlen(result);
+}
+
+Term sys_grep_file_run(Env e, Term* f, IoWork* w) {
+  GrepWorkData* d = malloc(sizeof(GrepWorkData));
+  uint64_t l0 = 0, l1 = 0;
+  d->pattern = io_cstr(e, f[0], &l0);
+  d->path = io_cstr(e, f[1], &l1);
+  w->data = (char*)d;
+  return io_work(w, sys_grep_file_worker, sys_tool_pack);
+}
+
+static void __attribute__((constructor)) sys_grep_file_use(void) {
+  io_eff(CID_SYS_GREP_FILE, sys_grep_file_run, 0);
+}
+#endif  // CID_SYS_GREP_FILE

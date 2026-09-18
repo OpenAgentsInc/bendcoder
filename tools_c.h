@@ -15,6 +15,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <dirent.h>
 
 // MAX_OUTPUT_SIZE from ~/coder files.rs: the whole-file size a Read refuses
 // once no limit narrows it, so a stray read cannot swamp the agent's state.
@@ -416,66 +417,170 @@ static char* tool_edit(const char* path, const char* old_str, const char* new_st
     : bender_fmt("The file %s has been updated successfully.", path);
 }
 
-static char* tool_grep(const char* pattern, const char* path) {
-    if (bender_is_dir(path)) {
-        return bender_fmt("error: EISDIR: illegal operation on a directory, grep '%s'", path);
-    }
-    size_t len = 0;
-    char* content = bender_slurp(path, &len);
-    if (!content) return bender_fmt("error: Failed to open %s for reading", path);
+// ----------------------------------------------------------------------------
+// Grep
+// ----------------------------------------------------------------------------
+// Literal (not regular-expression) search. A file is searched on its own and
+// matches render as "N:line"; a directory is searched recursively and matches
+// render as "path:N:line", the spelling grep itself uses, so a result can be
+// handed straight to Read or Edit.
 
-    char* result = NULL;
-    size_t result_cap = 0;
-    size_t result_len = 0;
-    size_t line_no = 1;
-    char* ptr = content;
+// Matches are capped on both counts because the result goes into the agent's
+// state: a common pattern over a whole tree would otherwise crowd out
+// everything else the agent had learned.
+#define BENDER_GREP_MAX_MATCHES 200
+#define BENDER_GREP_MAX_LINE 500
+#define BENDER_GREP_MAX_FILE_SIZE (1024 * 1024)
 
-    while (ptr && *ptr) {
-        char* nl = strchr(ptr, '\n');
-        size_t line_len = nl ? (size_t)(nl - ptr) : strlen(ptr);
-        if (line_len > 0 && ptr[line_len - 1] == '\r') line_len--;  // strip CR
+typedef struct {
+  char* data;
+  size_t len;
+  size_t cap;
+  size_t matches;
+  int truncated;
+  int failed;
+} GrepSink;
 
-        // duplicate the line for easy searching
-        char* line = strndup(ptr, line_len);
-        if (!line) {
-            free(result);
-            free(content);
-            return strdup("error: out of memory");
-        }
-
-        if (strstr(line, pattern)) {
-            // ensure enough space
-            size_t needed = result_len + 20 + line_len + 2;
-            if (needed > result_cap) {
-                result_cap = needed * 2;
-                char* tmp = (char*)realloc(result, result_cap);
-                if (!tmp) {
-                    free(line);
-                    free(result);
-                    free(content);
-                    return strdup("error: out of memory");
-                }
-                result = tmp;
-            }
-            int n = snprintf(result + result_len, result_cap - result_len, "%zu:%.*s\n",
-                             line_no, (int)line_len, ptr);
-            result_len += (size_t)n;
-        }
-
-        free(line);
-        line_no++;
-        if (!nl) break;
-        ptr = nl + 1;
-    }
-
-    free(content);
-    if (!result) {
-        return strdup("<system-reminder>No matches found for pattern.</system-reminder>");
-    }
-    // trim trailing newline
-    if (result_len > 0 && result[result_len - 1] == '\n') {
-        result[result_len - 1] = '\0';
-    }
-    return result;
+static void grep_sink_put(GrepSink* g, const char* text, size_t len) {
+  if (g->failed) return;
+  if (g->len + len + 1 > g->cap) {
+    size_t cap = (g->len + len + 1) * 2;
+    char* grown = (char*)realloc(g->data, cap);
+    if (!grown) { g->failed = 1; return; }
+    g->data = grown;
+    g->cap = cap;
+  }
+  memcpy(g->data + g->len, text, len);
+  g->len += len;
+  g->data[g->len] = '\0';
 }
+
+static void grep_sink_fmt(GrepSink* g, const char* fmt, ...) {
+  if (g->failed) return;
+  va_list ap;
+  va_start(ap, fmt);
+  char buf[BENDER_GREP_MAX_LINE + 512];
+  int n = vsnprintf(buf, sizeof(buf), fmt, ap);
+  va_end(ap);
+  if (n > 0) grep_sink_put(g, buf, (size_t)n < sizeof(buf) ? (size_t)n : sizeof(buf) - 1);
+}
+
+// Scans one file's bytes. `label` prefixes each hit when searching a tree, and
+// is NULL for a single-file search.
+static void grep_scan(GrepSink* g, const char* pattern, const char* label,
+                      char* text, size_t len) {
+  size_t line_no = 1;
+  size_t i = 0;
+  while (i <= len) {
+    size_t line_end = i;
+    while (line_end < len && text[line_end] != '\n') line_end++;
+
+    size_t line_len = line_end - i;
+    if (line_len > 0 && text[i + line_len - 1] == '\r') line_len--;  // CRLF
+
+    // The line is NUL-terminated in place for the search and put back after,
+    // which keeps the scan allocation-free.
+    char saved = text[i + line_len];
+    text[i + line_len] = '\0';
+    int hit = strstr(text + i, pattern) != NULL;
+    text[i + line_len] = saved;
+
+    if (hit) {
+      if (g->matches >= BENDER_GREP_MAX_MATCHES) {
+        g->truncated = 1;
+        return;
+      }
+      size_t shown = line_len > BENDER_GREP_MAX_LINE ? BENDER_GREP_MAX_LINE : line_len;
+      if (label) {
+        grep_sink_fmt(g, "%s:%zu:%.*s%s\n", label, line_no, (int)shown, text + i,
+                      shown < line_len ? " ..." : "");
+      } else {
+        grep_sink_fmt(g, "%zu:%.*s%s\n", line_no, (int)shown, text + i,
+                      shown < line_len ? " ..." : "");
+      }
+      g->matches++;
+    }
+
+    line_no++;
+    if (line_end >= len) break;
+    i = line_end + 1;
+  }
+}
+
+// Binary files have no lines worth showing and would corrupt the state, so a
+// NUL byte near the head is taken as the signal to skip the file.
+static int grep_looks_binary(const char* text, size_t len) {
+  size_t check = len < 8192 ? len : 8192;
+  return memchr(text, '\0', check) != NULL;
+}
+
+static void grep_file(GrepSink* g, const char* pattern, const char* path, const char* label) {
+  struct stat st;
+  if (stat(path, &st) != 0 || !S_ISREG(st.st_mode)) return;
+  if (st.st_size > BENDER_GREP_MAX_FILE_SIZE) return;
+  size_t len = 0;
+  char* text = bender_slurp(path, &len);
+  if (!text) return;
+  if (!grep_looks_binary(text, len)) grep_scan(g, pattern, label, text, len);
+  free(text);
+}
+
+static void grep_tree(GrepSink* g, const char* pattern, const char* dir) {
+  if (g->truncated || g->failed) return;
+  DIR* d = opendir(dir);
+  if (!d) return;
+  struct dirent* entry;
+  while ((entry = readdir(d)) != NULL) {
+    if (entry->d_name[0] == '.') continue;  // . .. .git and other dot entries
+    char child[1024];
+    // "./x" reads worse than "x" in a result a model will quote back.
+    if (strcmp(dir, ".") == 0) {
+      snprintf(child, sizeof(child), "%s", entry->d_name);
+    } else {
+      snprintf(child, sizeof(child), "%s/%s", dir, entry->d_name);
+    }
+    if (bender_is_dir(child)) {
+      grep_tree(g, pattern, child);
+    } else {
+      grep_file(g, pattern, child, child);
+    }
+    if (g->truncated || g->failed) break;
+  }
+  closedir(d);
+}
+
+// Searches `path` for the literal `pattern`. Returns the matches, a message
+// when there are none, or "error: " text.
+static char* tool_grep(const char* pattern, const char* path) {
+  if (!pattern || pattern[0] == '\0') {
+    return strdup("error: The search pattern is empty, which would match every line.");
+  }
+  if (!bender_exists(path)) {
+    return bender_fmt("error: File does not exist: %s", path);
+  }
+
+  GrepSink g = {NULL, 0, 0, 0, 0, 0};
+  if (bender_is_dir(path)) {
+    grep_tree(&g, pattern, path);
+  } else {
+    grep_file(&g, pattern, path, NULL);
+  }
+
+  if (g.failed) {
+    free(g.data);
+    return strdup("error: out of memory");
+  }
+  if (g.matches == 0) {
+    free(g.data);
+    return bender_fmt("No matches found for '%s' in %s.", pattern, path);
+  }
+  if (g.truncated) {
+    grep_sink_fmt(&g, "... (stopped at %d matches; narrow the pattern)\n",
+                  BENDER_GREP_MAX_MATCHES);
+  }
+  // The trailing newline belongs to the last line, not to the result.
+  if (g.len > 0 && g.data[g.len - 1] == '\n') g.data[--g.len] = '\0';
+  return g.data;
+}
+
 #endif  // BENDER_TOOLS_C_H

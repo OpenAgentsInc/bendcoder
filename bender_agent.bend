@@ -83,6 +83,7 @@ def loop_triage_questions() -> List<&2, P.Question>:
       "Based on the current state, what is the single next best action to advance or verify the task?",
       [
         P.Opt{"read_code", "Read source code or repository files to understand context or inspect implementations"},
+        P.Opt{"search_code", "Search the repository for a literal string to find which files are relevant"},
         P.Opt{"run_build", "Run build, compile, or test command to check if code works or reproduces an error"},
         P.Opt{"generate_fix", "Synthesize code, write a patch, or generate a fix using the LLM"},
         P.Opt{"task_complete", "The task is successfully resolved, verified, and complete"}
@@ -110,6 +111,39 @@ def report(label: String, +out: String) -> IO(Progress):
     u1 : Unit <- IO.print("   " ++ out)
     IO.pure(Progress, Running{"\n[" ++ label ++ "]:\n" ++ out})
 
+# A model asked for one search string routinely prepends its reasoning, so the
+# last non-empty line is taken. Mirrors extract_search_pattern in bender_agent.c.
+# A match cannot scrutinize a computed value, so the emptiness test is made by
+# the caller and dispatched on here.
+def choose_line(is_blank: Bool, line: String, best: String) -> String:
+  match is_blank:
+    case True{}:
+      best
+    case False{}:
+      line
+
+def pick_last(ls: List<&2, String>, best: String) -> String:
+  match ls:
+    case Nil{}:
+      best
+    case +l <> rest:
+      pick_last(rest, choose_line(String.is_empty(String.trim(l)), String.trim(l), best))
+
+def search_with(+pattern: String) -> IO(Progress):
+  do IO<Progress>:
+    u1 : Unit <- IO.print(color_magenta("[TOOL SEARCH] Searching for '") ++ pattern ++ color_magenta("' ..."))
+    hits : String <- P.Grep(pattern, ".")
+    report("Search Hits", hits)
+
+def act_search_code(state: String) -> IO(Progress):
+  do IO<Progress>:
+    reply : String <- GenerateText(
+      "openai/gpt-oss-120b:nitro",
+      "You choose one literal search string. Reply with the string alone, nothing else.",
+      "State:\n" ++ state ++ "\nGive one literal string to search this repository for. Not a regular expression."
+    )
+    search_with(pick_last(String.lines(reply), ""))
+
 def act_run_build() -> IO(Progress):
   do IO<Progress>:
     u1 : Unit <- IO.print(color_magenta("[TOOL EXEC] Running verification: './run_tests.sh' ..."))
@@ -134,7 +168,9 @@ def act_generate_fix(state: String) -> IO(Progress):
 
 # A match can only scrutinize a parameter or a field, never a computed value,
 # so the equality tests are made by the caller and dispatched on here.
-def dispatch_action(is_complete: Bool, is_build: Bool, is_read: Bool, state: String) -> IO(Progress):
+def dispatch_action(
+  is_complete: Bool, is_build: Bool, is_read: Bool, is_search: Bool, state: String
+) -> IO(Progress):
   match is_complete:
     case True{}:
       IO.pure(Progress, Finished{})
@@ -147,7 +183,11 @@ def dispatch_action(is_complete: Bool, is_build: Bool, is_read: Bool, state: Str
             case True{}:
               act_read_code()
             case False{}:
-              act_generate_fix(state)
+              match is_search:
+                case True{}:
+                  act_search_code(state)
+                case False{}:
+                  act_generate_fix(state)
 
 # `decision` is printed once and compared three times, hence `+`.
 def run_action(+decision: String, state: String) -> IO(Progress):
@@ -158,6 +198,7 @@ def run_action(+decision: String, state: String) -> IO(Progress):
       String.eq(decision, "task_complete"),
       String.eq(decision, "run_build"),
       String.eq(decision, "read_code"),
+      String.eq(decision, "search_code"),
       state
     )
 
@@ -194,5 +235,16 @@ def run_agent(fuel: Nat, +goal: String) -> IO(Unit):
     u3 : Unit <- IO.print("")
     agent_step(fuel, Running{""}, 1, goal)
 
+# Bend has no argv — Base offers only IO.get_env — so the goal arrives as an
+# environment variable, where bender_agent.c takes it from argv[1].
+def goal_or_default(r: Result<&1, &1, U32 & String, String>) -> String:
+  match r:
+    case Fail{e}:
+      "Project: Bender repo. Goal: Inspect the repository, verify hello.bend, and confirm autonomous capabilities are operating."
+    case Done{v}:
+      v
+
 def main() -> IO(Unit):
-  run_agent(4n, "Project: Bender repo. Goal: Inspect the repository, verify hello.bend, and confirm autonomous capabilities are operating.")
+  do IO<Unit>:
+    env : Result<&1, &1, U32 & String, String> <- IO.get_env("BENDER_GOAL")
+    run_agent(6n, goal_or_default(env))

@@ -48,6 +48,17 @@ int main(void) {
   check(extract_existing_path("/etc/passwd") == NULL, "absolute path not extracted");
   check(extract_existing_path("docs") == NULL, "directory not extracted");
 
+  char* s1 = extract_search_pattern("tool_grep");
+  check(s1 && strcmp(s1, "tool_grep") == 0, "bare search pattern extracted");
+  free(s1);
+  char* s2 = extract_search_pattern("Let me think about this.\nThe best string is:\n`state_append`");
+  check(s2 && strcmp(s2, "state_append") == 0, "pattern taken from the last line, unquoted");
+  free(s2);
+  char* s3 = extract_search_pattern("\"BENDER_MAX_STEPS\"");
+  check(s3 && strcmp(s3, "BENDER_MAX_STEPS") == 0, "surrounding quotes stripped");
+  free(s3);
+  check(extract_search_pattern("   \n  \n") == NULL, "blank reply yields no pattern");
+
   check(path_is_in_repo("sys_c.c"), "relative path allowed");
   check(!path_is_in_repo("/etc/passwd"), "absolute path refused");
   check(!path_is_in_repo("../secrets"), "parent traversal refused");
@@ -97,7 +108,8 @@ int main(void) {
   check(strncmp(e6, "error:", 6) == 0, "stripping does not invent a match that is not there");
   free(e6);
   // The exact text must still win over the stripped reading.
-  char* w2 = tool_write(tmp, "one\nTWO\nthree\n9\tnine\n", 22);
+  const char* numbered_looking = "one\nTWO\nthree\n9\tnine\n";
+  char* w2 = tool_write(tmp, numbered_looking, strlen(numbered_looking));
   free(w2);
   char* e7 = tool_edit(tmp, "9\tnine", "NINE", 0);
   check(strncmp(e7, "The file", 8) == 0, "an exact match that looks numbered is taken literally");
@@ -125,11 +137,40 @@ int main(void) {
         "tool_grep reports no matches");
   free(g2);
 
-  // Grep a directory should produce an error.
-  char* g3 = tool_grep("anything", "/tmp/bender_tool_test");
-  check(g3 && strncmp(g3, "error:", 6) == 0,
-        "tool_grep on a directory yields error");
+  // A directory searches the tree beneath it and labels each hit with its path,
+  // which is what makes grep useful for finding a file rather than guessing one.
+  char* g3 = tool_grep("NINE", "/tmp/bender_tool_test");
+  check(g3 && strstr(g3, "/tmp/bender_tool_test/nested/f.txt:4:NINE") != NULL,
+        "tool_grep on a directory searches the tree and labels hits with the path");
   free(g3);
+
+  char* g4 = tool_grep("", tmp);
+  check(strncmp(g4, "error:", 6) == 0, "tool_grep refuses an empty pattern");
+  free(g4);
+
+  char* g5 = tool_grep("x", "/tmp/bender_tool_test/no_such_file");
+  check(strncmp(g5, "error:", 6) == 0, "tool_grep reports a missing path as an error");
+  free(g5);
+
+  // A very long match is clipped so one minified line cannot swamp the state.
+  char long_line[BENDER_GREP_MAX_LINE + 200];
+  memset(long_line, 'q', sizeof(long_line) - 1);
+  long_line[sizeof(long_line) - 1] = '\0';
+  memcpy(long_line, "needle", 6);
+  char* w3 = tool_write("/tmp/bender_tool_test/long.txt", long_line, strlen(long_line));
+  free(w3);
+  char* g6 = tool_grep("needle", "/tmp/bender_tool_test/long.txt");
+  check(g6 && strlen(g6) < BENDER_GREP_MAX_LINE + 64, "tool_grep clips an over-long line");
+  check(g6 && strstr(g6, "...") != NULL, "tool_grep marks a clipped line");
+  free(g6);
+
+  // A binary file has no lines worth showing and is skipped rather than dumped.
+  char nul_bytes[16] = {'h','i',0,'m','a','t','c','h',0,0,0,0,0,0,0,0};
+  char* w4 = tool_write("/tmp/bender_tool_test/bin.dat", nul_bytes, sizeof(nul_bytes));
+  free(w4);
+  char* g7 = tool_grep("match", "/tmp/bender_tool_test/bin.dat");
+  check(g7 && strncmp(g7, "No matches", 10) == 0, "tool_grep skips a binary file");
+  free(g7);
 
   printf("\n%d failure(s)\n", fails);
   return fails != 0;
