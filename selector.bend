@@ -42,7 +42,7 @@ def questions() -> List<&2, P.Question>:
   [
     P.ChoiceQ{
       "action",
-      "Based on the current state, what is the single next best action to advance or verify the task?",
+      "Given `directive`, `program`, `observations` and `facts`, what is the single next best action to advance or verify the task?",
       [
         P.Opt{A.show_action(A.ReadCode{}), "Read source code or repository files to understand context or inspect implementations"},
         P.Opt{A.show_action(A.SearchCode{}), "Search the repository for a literal string to find which files are relevant"},
@@ -55,15 +55,15 @@ def questions() -> List<&2, P.Question>:
     },
     P.NoulQ{
       "is_blocked",
-      "Is the task blocked by an error or failing verification?"
+      "Is the task blocked by an error or a failing `facts.verification`?"
     },
     P.NoulQ{
       "repeats",
-      "Would the next action repeat something the state already records having tried without success?"
+      "Would the next action repeat something `observations` or `index.search_hits` already record having tried without success?"
     },
     P.NoulQ{
       "needs_code_change",
-      "Does satisfying this goal require editing files in this repository, rather than only answering in prose?"
+      "Does satisfying `directive` require editing files in this repository, rather than only answering in prose?"
     },
     P.ScoreQ{
       "risk",
@@ -76,7 +76,7 @@ def questions() -> List<&2, P.Question>:
     },
     P.ScoreQ{
       "progress_score",
-      "How close is the current state to a fully verified resolution?",
+      "How close are `observations` and `facts.verification` to a fully verified resolution?",
       [
         "0: Just starting / investigating",
         "1: Root cause understood, attempting fix",
@@ -362,7 +362,7 @@ def edit_file_questions(+listing: String) -> List<&2, P.Question>:
   [
     P.ChoiceQ{
       "file_to_edit",
-      "Which single file holds the code the requested change needs to modify?",
+      "Which single file in `index.paths` holds the code the requested change needs to modify?",
       listing_options(listing)
     }
   ]

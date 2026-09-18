@@ -103,6 +103,10 @@ def json_escape(s: String) -> String:
     case SCon{h, t}:
       json_escape_char(h) ++ json_escape(t)
 
+# One string as a JSON string literal: quoted and escaped.
+def json_str(s: String) -> String:
+  "\"" ++ json_escape(s) ++ "\""
+
 # ------------------------------------------------------------------------------
 # High-Level Classify Question Definitions
 # ------------------------------------------------------------------------------
@@ -139,13 +143,13 @@ def choice_option_to_json(o: OptionPair) -> String:
 def choice_options_to_json(opts: List<&2, OptionPair>) -> String:
   String.join(map_data(~OptionPair, ~String, ~choice_option_to_json, opts), ",")
 
-# Serialize one rubric level into a JSON string
-def rubric_item_to_json(item: String) -> String:
-  "\"" ++ json_escape(item) ++ "\""
-
-# Serialize Score rubric into JSON array
+# Serialize Score rubric into JSON array body
 def score_rubric_to_json(rubric: List<&2, String>) -> String:
-  String.join(map_data(~String, ~String, ~rubric_item_to_json, rubric), ",")
+  String.join(map_data(~String, ~String, ~json_str, rubric), ",")
+
+# A list of strings as a JSON array
+def json_str_list(xs: List<&2, String>) -> String:
+  "[" ++ String.join(map_data(~String, ~String, ~json_str, xs), ",") ++ "]"
 
 # Serialize single question to JSON
 def question_to_json(q: Question) -> String:
@@ -161,9 +165,164 @@ def question_to_json(q: Question) -> String:
 def questions_to_json(qs: List<&2, Question>) -> String:
   String.join(map_data(~Question, ~String, ~question_to_json, qs), ",")
 
+# ------------------------------------------------------------------------------
+# The structured state (design rule 3)
+# ------------------------------------------------------------------------------
+# Classify sends `state` as a JSON object with named fields rather than one
+# hand-escaped string of "[label]:" sections. A question can then point at a
+# field with a backticked path -- `observations`, `index.search_hits` -- where
+# a blob made a previous attempt indistinguishable from a file's contents.
+# This is #14's typed transcript seen from the wire side: when the List<Step>
+# lands, `observations` is what it renders into; until then the entries are
+# the same "[label]:\nbody" texts the string state carried.
+#
+# `index` is injected retrieval: retrieval the model must ask for is not
+# called, so the repository listing and the searches already run travel in
+# every payload rather than behind a tool call.
+
+# The last verification's outcome, rendered "unknown"/"passed"/"failed".
+type Verif is Data:
+  VUnknown{}
+  VPass{}
+  VFail{}
+
+type State is Data:
+  St{
+    directive: String,               # the goal, verbatim
+    step: String,                    # the action last run; "" before the first
+    steps_done: List<&2, String>,    # actions that ran before `step`, oldest first
+    observations: List<&2, String>,  # bounded tool results, newest last
+    changed_paths: List<&2, String>, # files an applied edit left changed
+    verification: Verif,             # the last verification's outcome
+    index_paths: List<&2, String>,   # the repository listing, injected
+    search_hits: List<&2, String>,   # the searches already run, injected
+    steps_left: U32                  # fuel the loop has left
+  }
+
+# The budget the rendered observations must fit, standing where the C
+# buffer's 32768 did, and the per-entry clip standing where
+# BENDER_MAX_TOOL_OUTPUT did. Written as products rather than literals: a Nat
+# is unary, so 32768n expands to that many constructors at check time and
+# overflows the machine stack.
+def state_budget() -> Nat: Nat.mul(256n, 128n)
+def entry_budget() -> Nat: Nat.mul(60n, 100n)
+
+# `over` is the computed length check arriving as a parameter, because a match
+# cannot scrutinize a computed value — the same split every bounded walk in
+# this codebase takes.
+def clip.of(+body: String, over: Bool) -> String:
+  match over:
+    case True{}:
+      String.take(body, entry_budget()) ++ "\n... (output truncated)"
+    case False{}:
+      body
+
+def clip(+body: String) -> String:
+  clip.of(body, Nat.is_gt(String.length(body), entry_budget()))
+
+# Whether the head of xs clips inside `room` — computed before the walk's
+# match can see it, because a match cannot scrutinize the comparison itself.
+# The head is clipped twice (here and in the kept case); at agent scale the
+# second clip costs nothing.
+def bound.head_fits(xs: List<&2, String>, room: Nat) -> Bool:
+  match xs:
+    case Nil{}:
+      False{}
+    case +h <> t:
+      Nat.is_le(String.length(clip(h)), room)
+
+# Walks a newest-first list keeping what fits in `room` and counting what it
+# drops. `keep` is the caller's answer to bound.head_fits for xs's head: an
+# entry that does not fit ends the walk, and it plus every entry older than
+# it is the deliberate drop. Entries cons onto the front of acc as they are
+# met, so acc ends oldest-first — chronological order — without a reverse.
+def bound.go(
+  xs: List<&2, String>, keep: Bool, acc: List<&2, String>, room: Nat
+) -> List<&2, String> & Nat:
+  match xs keep:
+    case _ False{}:
+      (acc, List.length(&2, String, xs))
+    case Nil{} _:
+      (acc, 0n)
+    case +h <> +t True{}:
+      +e = clip(h)
+      +room2 = Nat.sub(room, String.length(e))
+      bound.go(t, bound.head_fits(t, room2), e <> acc, room2)
+
+# The count of dropped entries, said out loud as the first element: a run
+# whose observations overflowed the budget is visible in the state itself.
+def bound.fin.drop(+acc: List<&2, String>, d: Nat) -> List<&2, String>:
+  match d:
+    case 0n:
+      acc
+    case 1n+p:
+      ("..." ++ Nat.show(1n+p) ++ " earlier entr(ies) dropped to fit the state budget ...") <> acc
+
+# The pair from the walk is opened here rather than at the call, where the
+# destructure would read as a match on the computed call.
+def bound.fin(accd: List<&2, String> & Nat) -> List<&2, String>:
+  (acc, d) = accd
+  bound.fin.drop(acc, d)
+
+# The bounded form of a newest-last list at an explicit budget — split from
+# `bound` so the suite can exercise the drop without building 32 KB of text.
+def bound.with(+xs: List<&2, String>, +budget: Nat) -> List<&2, String>:
+  +rev = List.reverse(&2, String, xs)
+  bound.fin(bound.go(
+    rev, bound.head_fits(rev, budget), {Nil{} : List<&2, String>}, budget))
+
+def bound(+xs: List<&2, String>) -> List<&2, String>:
+  bound.with(xs, state_budget())
+
+def verif_str(v: Verif) -> String:
+  match v:
+    case VUnknown{}:
+      "unknown"
+    case VPass{}:
+      "passed"
+    case VFail{}:
+      "failed"
+
+# The whole record rendered to the request's `state` object — the shape the
+# selector design gives it, so each question's backticked path names a real
+# field. `index.paths` is capped at the Choice option cap: a listing longer
+# than that could not be offered as options anyway.
+def state_to_json(s: State) -> String:
+  match s:
+    case St{+directive, +step, +done, +obs, +changed, verification, +paths, +hits, +left}:
+      "{\"directive\":" ++ json_str(directive)
+        ++ ",\"program\":{\"step\":" ++ json_str(step)
+        ++ ",\"steps_done\":" ++ json_str_list(done) ++ "}"
+        ++ ",\"observations\":" ++ json_str_list(bound(obs))
+        ++ ",\"facts\":{\"changed_paths\":" ++ json_str_list(changed)
+        ++ ",\"verification\":" ++ json_str(verif_str(verification)) ++ "}"
+        ++ ",\"index\":{\"paths\":" ++ json_str_list(List.take(&2, String, paths, 255n))
+        ++ ",\"search_hits\":" ++ json_str_list(bound(hits)) ++ "}"
+        ++ ",\"budget\":{\"steps_left\":" ++ U32.show(left) ++ "}}"
+
+# The text form the generative model still gets — Classify reads the object,
+# but Generate's prompts want prose, which is the directive plus the
+# observations exactly as the old string state concatenated them.
+def state_text(s: State) -> String:
+  match s:
+    case St{+directive, step, done, +obs, changed, verification, paths, hits, left}:
+      directive ++ String.concat(obs)
+
+# The injected repository listing in the shape the anchor's file Choice
+# already consumes — one path per line.
+def state_listing(s: State) -> String:
+  match s:
+    case St{directive, step, done, obs, changed, verification, +paths, hits, left}:
+      String.join(paths, "\n")
+
+# The state a run starts with: the goal as directive, the injected listing as
+# index.paths, and everything else at its empty or "unknown" initial value.
+def state.new(+directive: String, +paths: List<&2, String>, +left: U32) -> State:
+  St{directive, "", Nil{}, Nil{}, Nil{}, VUnknown{}, paths, Nil{}, left}
+
 # Build complete TypeSafe System One request JSON
-def build_classify_payload(state: String, qs: List<&2, Question>) -> String:
-  "{\"state\":\"" ++ json_escape(state) ++ "\",\"model\":\"jev-latest\",\"questions\":{" ++ questions_to_json(qs) ++ "}}"
+def build_classify_payload(state: State, qs: List<&2, Question>) -> String:
+  "{\"state\":" ++ state_to_json(state) ++ ",\"model\":\"jev-latest\",\"questions\":{" ++ questions_to_json(qs) ++ "}}"
 
 # ------------------------------------------------------------------------------
 # High-Level Classify Answer Definitions
@@ -200,7 +359,7 @@ def ParseAnswer(json: String, qid: String) -> IO(Answer):
 # Classify takes the current agent state and a list of typed questions.
 # It dispatches them to TypeSafe System One in a single parallel call,
 # returning the structured JSON result directly.
-def Classify(state: String, questions: List<&2, Question>) -> IO(String):
+def Classify(state: State, questions: List<&2, Question>) -> IO(String):
   do IO<String>:
     payload : String <- IO.pure(String, build_classify_payload(state, questions))
     typesafe.post(payload)
@@ -274,3 +433,27 @@ def EditFileAll(path: String, old_str: String, new_str: String) -> IO(String):
 # appear and where.
 def Grep(pattern: String, path: String) -> IO(String):
   sys.grep_file(pattern, path)
+
+# ------------------------------------------------------------------------------
+# The render, exercised: the object shape and the deliberate drop, pinned
+# ------------------------------------------------------------------------------
+def demo_state() -> State:
+  St{
+    "add a greet function",
+    "search_code",
+    ["read_code"],
+    ["[Search for 'greet']:\nhello.bend:4:greet"],
+    ["hello.bend"],
+    VPass{},
+    ["agent_primitives.bend", "hello.bend"],
+    ["greet:\nhello.bend:4:greet"],
+    5
+  }
+
+def main() -> IO(Unit):
+  do IO<Unit>:
+    u1 : Unit <- IO.print(state_to_json(demo_state()))
+    IO.print(json_str_list(bound.with(["aaa", "bbb", "ccc"], 4n)))
+
+#|{"directive":"add a greet function","program":{"step":"search_code","steps_done":["read_code"]},"observations":["[Search for 'greet']:\nhello.bend:4:greet"],"facts":{"changed_paths":["hello.bend"],"verification":"passed"},"index":{"paths":["agent_primitives.bend","hello.bend"],"search_hits":["greet:\nhello.bend:4:greet"]},"budget":{"steps_left":5}}
+#|["...2 earlier entr(ies) dropped to fit the state budget ...","ccc"]
