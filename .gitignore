@@ -1,4 +1,5 @@
 .env.typesafe
+.env.openrouter
 call_typesafe_bin
 call_typesafe.c
 agent_primitives.c

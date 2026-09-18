@@ -8,11 +8,12 @@ import Base
 #              Given the agent's current state (context, errors, code, instructions)
 #              and structured questions (Choice, Score, Noul), Classify yields
 #              deterministic routing and probabilities.
-# 2. Generate: Generative synthesis (writing code, generating responses, diffs).
+# 2. Generate: Generative synthesis (writing code, generating responses, diffs)
+#              powered by LLMs (OpenRouter / OpenAI-compatible / Gemini).
 # ==============================================================================
 
 # ------------------------------------------------------------------------------
-# Low-level FFI to TypeSafe System One HTTP API
+# Low-level FFI: TypeSafe System One
 # ------------------------------------------------------------------------------
 law typesafe.post:
   String -> IO(String)
@@ -20,6 +21,16 @@ law typesafe.post:
 def typesafe.post(payload):
   import "./typesafe_c.c"
   import "./typesafe_c.js"
+
+# ------------------------------------------------------------------------------
+# Low-level FFI: OpenRouter / LLM Generation
+# ------------------------------------------------------------------------------
+law openrouter.post:
+  String -> IO(String)
+
+def openrouter.post(payload):
+  import "./openrouter_c.c"
+  import "./openrouter_c.js"
 
 # ------------------------------------------------------------------------------
 # JSON String escaping
@@ -118,6 +129,20 @@ def Classify(state: String, questions: List<&2, Question>) -> IO(String):
     typesafe.post(payload)
 
 # ------------------------------------------------------------------------------
+# The Generate Primitive
+# ------------------------------------------------------------------------------
+# Build OpenAI-compatible chat completion payload
+def build_generate_payload(model: String, system_prompt: String, prompt: String) -> String:
+  "{\"model\":\"" ++ json_escape(model) ++ "\",\"messages\":[{\"role\":\"system\",\"content\":\"" ++ json_escape(system_prompt) ++ "\"},{\"role\":\"user\",\"content\":\"" ++ json_escape(prompt) ++ "\"}]}"
+
+# Generate takes a model identifier, system prompt, and user prompt.
+# It dispatches the request to OpenRouter (or configured OpenAI-compatible endpoint).
+def Generate(model: String, system_prompt: String, prompt: String) -> IO(String):
+  do IO<String>:
+    payload : String <- IO.pure(String, build_generate_payload(model, system_prompt, prompt))
+    openrouter.post(payload)
+
+# ------------------------------------------------------------------------------
 # Demonstration / Test
 # ------------------------------------------------------------------------------
 def agent_state() -> String:
@@ -153,14 +178,22 @@ def agent_questions() -> List<&2, Question>:
 def main() -> IO(Unit):
   do IO<Unit>:
     IO.print("==================================================")
-    IO.print("Bender Agent Primitives: Classify Demo")
+    IO.print("Bender Agent Primitives: Classify & Generate")
     IO.print("==================================================")
-    IO.print("Agent State:")
+    IO.print("1. AGENT STATE:")
     IO.print(agent_state())
     IO.print("")
-    IO.print("Executing Classify(state, questions)...")
-    resp : String <- Classify(agent_state(), agent_questions())
+    IO.print("2. RUNNING CLASSIFY (TypeSafe System One)...")
+    c_resp : String <- Classify(agent_state(), agent_questions())
+    IO.print("Classify Decision:")
+    IO.print(c_resp)
     IO.print("")
-    IO.print("Classify Response:")
-    IO.print(resp)
+    IO.print("3. RUNNING GENERATE (OpenRouter / LLM)...")
+    g_resp : String <- Generate(
+      "google/gemma-4-26b-a4b-it:free",
+      "You are an expert systems programmer. Provide a concise 1-2 sentence solution to the reported compiler/linker error.",
+      "Fix this compiler error: undefined reference to symbol 'curl_easy_init'. Show the exact compiler command."
+    )
+    IO.print("Generate Output:")
+    IO.print(g_resp)
     IO.print("==================================================")

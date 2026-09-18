@@ -1,6 +1,18 @@
 # bender
 
-Bender is a new coding agent written in **Bend2**, supplemented with C for network calls, HTTP requests, and any other systems interfaces missing in Bend2.
+Bender is a new coding agent written in **Bend2**, supplemented with C for network calls, HTTP requests, and systems interfaces missing in Bend2.
+
+## Philosophy: Two Primitives (`Classify` & `Generate`)
+
+Rather than dozens of ad-hoc tools and fragile multi-turn conversational loops, Bender distills agent actions into two core primitives:
+1. **`Classify` (System 1 - Fast, Calibrated Decision Making)**:
+   - Powered by **TypeSafe System One** (`jev-latest`).
+   - Evaluates state against typed questions (`Choice`, `Score`, `Noul`) to yield calibrated routing decisions and probabilities in a single batched HTTP call.
+2. **`Generate` (System 2 - Generative Synthesis)**:
+   - Powered by **OpenRouter** (or any OpenAI-compatible provider like Gemini / Ollama).
+   - Produces code synthesis, diff generation, and explanations when `Classify` determines generation is required.
+
+---
 
 ## Quickstart: Hello World
 
@@ -12,9 +24,7 @@ Ensure you have Bend installed (Bend 2.0+):
 bend --version
 ```
 
-### Running the Example
-
-Run the basic `hello.bend` program with the `bend` CLI:
+### Running Hello World
 
 ```bash
 bend hello.bend
@@ -25,60 +35,38 @@ Output:
 Hello, world!
 ```
 
-### Compiling to a Binary or C
+---
 
-You can also compile `hello.bend` to a native binary:
+## Agent Primitives: `Classify` & `Generate`
+
+Defined in `agent_primitives.bend`:
+- `Classify(state: String, questions: List<&2, Question>) -> IO(String)`
+- `Generate(model: String, system_prompt: String, prompt: String) -> IO(String)`
+
+### Running the Primitives Pipeline
 
 ```bash
-bend hello.bend -o hello
-./hello
-```
-
-Or emit C source code:
-
-```bash
-bend hello.bend -o hello.c
+./run_agent_primitives.sh
 ```
 
 ---
 
-## TypeSafe AI HTTP / System One Integration
+## API Keys & Configuration
 
-Bender interacts with the TypeSafe AI System One API (`https://api.typesafe.ai/v1/systemone`) for structured evaluation questions (`noul`, `choice`, `score`).
+Both keys are git-ignored and can be set in files or environment variables:
 
-### API Key Configuration
+### 1. TypeSafe System One (for `Classify`)
+- **File:** `.env.typesafe` (template: `.env.typesafe.example`)
+- **Env Var:** `TYPESAFE_API_KEY`
+- **Standalone cURL test:**
+  ```bash
+  ./call_typesafe.sh
+  ```
 
-The API key is loaded from the environment or a configuration file:
-- **File:** `.env.typesafe` (in the root directory, ignored by git)
-  - Replace `YOUR_TYPESAFE_API_KEY` with your actual TypeSafe API key.
-- **Environment Variable:** `TYPESAFE_API_KEY`
-
-### 1. Direct cURL Example (`call_typesafe.sh`)
-
-Test the endpoint directly via curl:
-
-```bash
-./call_typesafe.sh
-```
-
-This sends an evaluation request with:
-- State: Customer ticket describing payout failures.
-- Questions:
-  - `is_urgent`: Noul (urgency probability)
-  - `department`: Choice (billing, technical, sales)
-  - `frustration`: Score (Calm, Frustrated, Very angry)
-
-### 2. Bend2 + C FFI Example (`call_typesafe.bend`)
-
-This demonstrates Bend2 dispatching an IO effect handled by C (`typesafe_c.c`):
-
-```bash
-./run_bend_typesafe.sh
-```
-
-Or step by step:
-```bash
-bend call_typesafe.bend -o call_typesafe.c
-gcc -std=c11 -O3 call_typesafe.c -lpthread -lm -o call_typesafe_bin
-./call_typesafe_bin
-```
+### 2. OpenRouter (for `Generate`)
+- **File:** `.env.openrouter` (template: `.env.openrouter.example`)
+- **Env Var:** `OPENROUTER_API_KEY`
+- **Standalone cURL test:**
+  ```bash
+  ./call_openrouter.sh
+  ```
