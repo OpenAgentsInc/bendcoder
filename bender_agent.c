@@ -109,7 +109,8 @@ static char* call_typesafe_classify(const char* state_str) {
         "\"run_build\":\"Run a shell command, test, or build to inspect output\","
         "\"apply_edit\":\"Change the code on disk: the fix is understood and a concrete edit to a known file can be written now\","
         "\"generate_answer\":\"Synthesize the final answer, explanation, or code using the LLM\","
-        "\"task_complete\":\"The user request has already been completely answered and verified\"}},"
+        "\"task_complete\":\"The user request has already been completely answered and verified\","
+        "\"none\":\"No listed action fits: the state does not yet support a next step\"}},"
       "\"has_enough_info\":{\"type\":\"noul\",\"instructions\":\"Does the current state have enough concrete information to directly answer the user prompt?\"},"
       "\"needs_code_change\":{\"type\":\"noul\",\"instructions\":\"Does satisfying this goal require editing files in this repository, rather than only answering in prose?\"},"
       "\"confidence_score\":{\"type\":\"score\",\"instructions\":\"How confident are we that we can answer or finish now?\","
@@ -713,7 +714,8 @@ int main(int argc, char** argv) {
     }
 
     // Fallback: If we are on the penultimate or final step and still haven't generated an answer, force generate_answer.
-    if (step >= max_steps - 1 && final_answer == NULL && strcmp(decision, "task_complete") != 0) {
+    if (step >= max_steps - 1 && final_answer == NULL && decision[0] != '\0' &&
+        strcmp(decision, "none") != 0 && strcmp(decision, "task_complete") != 0) {
       free(decision);
       decision = strdup("generate_answer");
     }
@@ -724,7 +726,26 @@ int main(int argc, char** argv) {
       ANSI_DIM, conf, noul, score, ANSI_RESET);
 
     // 2. Dispatch
-    if (strcmp(decision, "task_complete") == 0) {
+    if (decision[0] == '\0') {
+      // Classify returned nothing parseable — a failed request, not a choice.
+      // Falling through to generate_answer would present the failure to the
+      // loop as a confident decision to generate. See #32.
+      printf("⚠️  %sClassify returned no answer; halting rather than guessing.%s\n",
+             ANSI_YELLOW, ANSI_RESET);
+      free(c_resp);
+      free(decision);
+      break;
+    } else if (strcmp(decision, "none") == 0) {
+      // Jev saying nothing fits, which a Choice can only express when it is
+      // given the option — its probabilities always sum to one.
+      printf("🛑 %sNo listed action fits the current state; stopping.%s\n",
+             ANSI_YELLOW, ANSI_RESET);
+      state_append(state, sizeof(state), "Stalled",
+        "Classify reported that no listed action fits the current state.");
+      free(c_resp);
+      free(decision);
+      break;
+    } else if (strcmp(decision, "task_complete") == 0) {
       free(c_resp);
       free(decision);
       break;

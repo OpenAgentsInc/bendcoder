@@ -74,6 +74,10 @@ type Progress is Data:
   Running{output: String}
   # Classify judged the task done; the loop stops here rather than on fuel.
   Finished{}
+  # Classify chose `none`: no listed action fits the state. Halting with the
+  # reason beats picking the least-bad action, which is what a Choice with no
+  # escape hatch forces, since its probabilities always sum to one.
+  Stalled{reason: String}
 
 # Questions asked of TypeSafe System One at each step of the loop
 def loop_triage_questions() -> List<&2, P.Question>:
@@ -188,25 +192,30 @@ def act_generate_fix(state: String) -> IO(Progress):
 # A match can only scrutinize a parameter or a field, never a computed value,
 # so the equality tests are made by the caller and dispatched on here.
 def dispatch_action(
-  is_complete: Bool, is_build: Bool, is_read: Bool, is_search: Bool, state: String
+  is_complete: Bool, is_none: Bool, is_build: Bool, is_read: Bool, is_search: Bool,
+  state: String
 ) -> IO(Progress):
   match is_complete:
     case True{}:
       IO.pure(Progress, Finished{})
     case False{}:
-      match is_build:
+      match is_none:
         case True{}:
-          act_run_build()
+          IO.pure(Progress, Stalled{"Classify reported that no listed action fits the current state."})
         case False{}:
-          match is_read:
+          match is_build:
             case True{}:
-              act_read_code()
+              act_run_build()
             case False{}:
-              match is_search:
+              match is_read:
                 case True{}:
-                  act_search_code(state)
+                  act_read_code()
                 case False{}:
-                  act_generate_fix(state)
+                  match is_search:
+                    case True{}:
+                      act_search_code(state)
+                    case False{}:
+                      act_generate_fix(state)
 
 # `decision` is printed once and compared three times, hence `+`.
 def run_action(+decision: String, state: String) -> IO(Progress):
@@ -215,6 +224,7 @@ def run_action(+decision: String, state: String) -> IO(Progress):
     u2 : Unit <- IO.print("")
     dispatch_action(
       String.eq(decision, "task_complete"),
+      String.eq(decision, "none"),
       String.eq(decision, "run_build"),
       String.eq(decision, "read_code"),
       String.eq(decision, "search_code"),
@@ -234,6 +244,8 @@ def agent_step(fuel: Nat, phase: Progress, +step_num: U32, +state: String) -> IO
       do IO<Unit>:
         u1 : Unit <- IO.print(color_green("[TASK COMPLETED] Bender verified all goals are met!"))
         IO.print(color_cyan("================================================================================"))
+    case f Stalled{reason}:
+      IO.print(color_yellow("[STALLED] ") ++ reason)
     case 0n Running{output}:
       IO.print(color_yellow("[HALT] Max step fuel reached. Pausing agent loop."))
     case 1n+p Running{+output}:
