@@ -4,9 +4,9 @@
 // bender_agent.c; this file is only the Bend FFI wrapping around them.
 //
 // The boundary is string-only, matching the other laws in the project: numeric
-// arguments (a read's offset and limit, an edit's replace_all flag) arrive as
-// decimal or "true"/"false" text and are parsed here, which keeps every law a
-// plain `String -> ... -> IO(String)`.
+// arguments (a read's limit, an edit's replace_all flag) arrive as decimal or
+// "true"/"false" text and are parsed here, which keeps every law's arguments
+// plain strings.
 //
 // Bend inlines this whole file once but only emits a CID_* for the laws a
 // program actually reaches from main, so each section is guarded on its own id.
@@ -122,7 +122,7 @@ static Term sys_tool_pack(Env e, IoWork* w) {
 // -----------------------------------------------------------------------------
 // 2. sys_read_file: read full raw file content into a String
 // sys.read_file(path: String) -> IO(String)
-// Unnumbered, for feeding a file straight to a model. Read uses sys_read_lines.
+// Unnumbered, for feeding a file straight to a model. Read uses sys_read_raw.
 // -----------------------------------------------------------------------------
 static void sys_read_file_worker(IoWork* w) {
   char* path = w->data;
@@ -149,45 +149,58 @@ static void __attribute__((constructor)) sys_read_file_use(void) {
 }
 #endif  // CID_SYS_READ_FILE
 
-#ifdef CID_SYS_READ_LINES
+#ifdef CID_SYS_READ_RAW
 // -----------------------------------------------------------------------------
-// 3. sys_read_lines: 1-indexed numbered read with offset and limit
-// sys.read_lines(path: String, offset: String, limit: String) -> IO(String)
-// offset "0" or "1" both start at line 1; limit "0" reads to end of file.
+// 3. sys_read_raw: the IO half of Read — checks, size cap, slurp, BOM strip
+// sys.read_raw(path: String, limit: String) ->
+//   IO(Result<&1, &1, U32 & String, String>)
+// Everything downstream of the bytes — the split on '\n', the offset/limit
+// selection, the "N\tline" rendering — is pure and lives in tool_read.bend,
+// so the worker hands the bytes over: Done{content} on success, Fail{(code,
+// message)} for the checked failures, whose message is the same "error: ..."
+// text tool_read produced. `limit` only decides whether the 256 KB cap on an
+// unbounded read applies.
 // -----------------------------------------------------------------------------
 typedef struct {
   char* path;
-  long offset;
-  long limit;
-} ReadLinesWorkData;
+  long  limit;
+} ReadRawWorkData;
 
-static void sys_read_lines_worker(IoWork* w) {
-  ReadLinesWorkData* d = (ReadLinesWorkData*)w->data;
-  char* result = tool_read(d->path, d->offset, d->limit);
+static void sys_read_raw_worker(IoWork* w) {
+  ReadRawWorkData* d = (ReadRawWorkData*)w->data;
+  int code = 0;
+  size_t len = 0;
+  char* result = tool_read_io(d->path, d->limit, &code, &len);
   free(d->path);
   free(d);
+  w->code = (u32)code;
   w->data = result;
-  w->size = strlen(result);
+  w->size = len;
 }
 
-Term sys_read_lines_run(Env e, Term* f, IoWork* w) {
-  ReadLinesWorkData* d = malloc(sizeof(ReadLinesWorkData));
-  uint64_t l0 = 0, l1 = 0, l2 = 0;
+static Term sys_read_raw_pack(Env e, IoWork* w) {
+  Term t = w->code
+    ? io_fail(e, w->code, w->data)
+    : io_done(e, io_str(e, w->data, w->size));
+  free(w->data);
+  return t;
+}
+
+Term sys_read_raw_run(Env e, Term* f, IoWork* w) {
+  ReadRawWorkData* d = malloc(sizeof(ReadRawWorkData));
+  uint64_t l0 = 0, l1 = 0;
   d->path = io_cstr(e, f[0], &l0);
-  char* offset_str = io_cstr(e, f[1], &l1);
-  char* limit_str = io_cstr(e, f[2], &l2);
-  d->offset = strtol(offset_str, NULL, 10);
+  char* limit_str = io_cstr(e, f[1], &l1);
   d->limit = strtol(limit_str, NULL, 10);
-  free(offset_str);
   free(limit_str);
   w->data = (char*)d;
-  return io_work(w, sys_read_lines_worker, sys_tool_pack);
+  return io_work(w, sys_read_raw_worker, sys_read_raw_pack);
 }
 
-static void __attribute__((constructor)) sys_read_lines_use(void) {
-  io_eff(CID_SYS_READ_LINES, sys_read_lines_run, 0);
+static void __attribute__((constructor)) sys_read_raw_use(void) {
+  io_eff(CID_SYS_READ_RAW, sys_read_raw_run, 0);
 }
-#endif  // CID_SYS_READ_LINES
+#endif  // CID_SYS_READ_RAW
 
 #ifdef CID_SYS_WRITE_FILE
 // -----------------------------------------------------------------------------

@@ -59,9 +59,13 @@ Grep(pattern: String, path: String) -> IO(String)
 Exec(cmd: String) -> IO(String)
 ```
 
-The FFI boundary is string-only — offsets, limits and the `replace_all` flag
-travel as text and are parsed in `sys_c.c` — which keeps every law a plain
-`String -> ... -> IO(String)`.
+The FFI boundary is string-only on the way in — offsets, limits and the
+`replace_all` flag travel as text and are parsed in `sys_c.c` — and results
+come back as plain strings or `Done`/`Fail` results. For `Read`, `sys_c.c`
+keeps the IO half (the stat checks, the 256 KB cap, the BOM strip); the split
+on `\n`, the offset/limit selection and the `N\tline` rendering are pure and
+live in `tool_read.bend`, where the line-count and prefix-strip round-trip are
+proved laws rather than examples in `test_tools.c`.
 
 ---
 

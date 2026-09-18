@@ -77,7 +77,7 @@ void  io_eff(u32 cid, Effect run, u32 need);
 
 #define CID_COMMAND_RUN        1
 #define CID_SYS_READ_FILE      2
-#define CID_SYS_READ_LINES     3
+#define CID_SYS_READ_RAW       3
 #define CID_SYS_WRITE_FILE     4
 #define CID_SYS_EDIT_FILE      5
 #define CID_SYS_GREP_FILE      6
