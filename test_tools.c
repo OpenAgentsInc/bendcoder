@@ -105,6 +105,24 @@ int main(void) {
   check(action_from_string("generate_answe") == ACT_UNRECOGNIZED,
         "a typo'd decision is a parse failure, not generate_answer");
 
+  // jev_answer returns the same fields as one typed value, with the kind the
+  // loop switches on. See #34.
+  JevAnswer ja = jev_answer(answers, "action");
+  check(ja.kind == JEV_CHOSEN && strcmp(ja.text, "read_code") == 0 &&
+        ja.confidence == 0.67, "the Choice answer reads as JEV_CHOSEN");
+  JevAnswer jn = jev_answer(answers, "needs_code_change");
+  check(jn.kind == JEV_NOULED && jn.probability == 0.9,
+        "the second Noul reads as JEV_NOULED, not the first");
+  JevAnswer js = jev_answer(answers, "confidence_score");
+  check(js.kind == JEV_SCORED && js.score == 0.45 && js.confidence == 0.33,
+        "the Score answer reads as JEV_SCORED");
+  JevAnswer jm = jev_answer(answers, "absent_question");
+  check(jm.kind == JEV_MISSING && jm.text[0] != '\0',
+        "an unanswered question is JEV_MISSING with a reason");
+  JevAnswer je = jev_answer("{\"error\":\"rate limited\",\"retry-after-ms\":5000}", "action");
+  check(je.kind == JEV_MISSING && strstr(je.text, "rate limited") != NULL,
+        "a failed request is JEV_MISSING carrying the error as its reason");
+
   check(path_is_in_repo("sys_c.c"), "relative path allowed");
   check(!path_is_in_repo("/etc/passwd"), "absolute path refused");
   check(!path_is_in_repo("../secrets"), "parent traversal refused");

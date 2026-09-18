@@ -300,24 +300,6 @@ static char* call_openrouter_generate(const char* prompt) {
   return call_openrouter_with_system(BENDER_ANSWER_SYSTEM, prompt);
 }
 
-static char* extract_choice(const char* json, const char* qid) {
-  char needle[128];
-  snprintf(needle, sizeof(needle), "\"%s\"", qid);
-  const char* p = strstr(json, needle);
-  if (!p) return strdup("");
-  const char* c = strstr(p, "\"choice\":");
-  if (!c) return strdup("");
-  c += strlen("\"choice\":");
-  while (*c == ' ' || *c == '\"') c++;
-  const char* end = c;
-  while (*end && *end != '\"' && *end != ',' && *end != '}') end++;
-  size_t len = end - c;
-  char* r = malloc(len + 1);
-  strncpy(r, c, len);
-  r[len] = '\0';
-  return r;
-}
-
 // Unescapes JSON string content into clean, readable text
 static char* extract_content(const char* json) {
   if (!json) return strdup("");
@@ -354,23 +336,147 @@ static char* extract_content(const char* json) {
   return out;
 }
 
-// Reads one numeric field of one question's answer. Scoped by question id
-// because the answers share field names: with more than one Noul in a request,
-// an unscoped search for "noul" always returns the first one and every later
-// question is silently discarded. See #27.
-static double extract_number(const char* json, const char* qid, const char* key) {
-  if (!json) return 0.0;
+// The span of the response belonging to one question: from its key to where
+// the next question's object opens. Scoped by question id because the answers
+// share field names: with more than one Noul in a request, an unscoped search
+// for "noul" always returns the first one and every later question is silently
+// discarded. See #27.
+static const char* answer_span(const char* json, const char* qid, const char** bound) {
   char needle[128];
   snprintf(needle, sizeof(needle), "\"%s\"", qid);
   const char* p = strstr(json, needle);
-  if (!p) return 0.0;
-  // Stop at the next question so a missing field cannot read its neighbour's.
-  const char* next = strstr(p + strlen(needle), "},\"");
-  const char* found = strstr(p, key);
-  if (!found || (next && found > next)) return 0.0;
-  found += strlen(key);
-  while (*found && (*found == ' ' || *found == ':' || *found == '\"')) found++;
-  return strtod(found, NULL);
+  if (!p) return NULL;
+  *bound = strstr(p + strlen(needle), "},\"");
+  return p;
+}
+
+// Reads the number after key inside [p, bound). Occurrences whose value is not
+// numeric are skipped — a qid like "confidence_score" contains "score": inside
+// its own key, and only the field's occurrence carries a number. 0 when no
+// occurrence parses, so a present 0.0 is still seen as a value.
+static int answer_num(const char* p, const char* bound, const char* key, double* out) {
+  const char* f = p;
+  while ((f = strstr(f, key)) != NULL) {
+    if (bound && f >= bound) return 0;
+    const char* v = f + strlen(key);
+    while (*v == ' ' || *v == '\"') v++;
+    char* end = NULL;
+    double d = strtod(v, &end);
+    if (end != v) { *out = d; return 1; }
+    f = v;
+  }
+  return 0;
+}
+
+// Reads the quoted string after key inside [p, bound), unescaping as it goes.
+// Occurrences whose value is not a string are skipped, as in answer_num.
+// Caller frees; NULL when the key is absent or the value is not a string.
+static char* answer_str(const char* p, const char* bound, const char* key) {
+  const char* f = p;
+  while ((f = strstr(f, key)) != NULL) {
+    if (bound && f >= bound) return NULL;
+    const char* v = f + strlen(key);
+    while (*v == ' ') v++;
+    if (*v != '\"') { f = v; continue; }
+    v++;
+    char* out = malloc(strlen(v) + 1);
+    size_t o = 0;
+    int esc = 0;
+    for (const char* c = v; *c && (!bound || c < bound); c++) {
+      if (esc) {
+        if (*c == 'n') out[o++] = '\n';
+        else if (*c == 'r') out[o++] = '\r';
+        else if (*c == 't') out[o++] = '\t';
+        else out[o++] = *c;
+        esc = 0;
+      } else if (*c == '\\') {
+        esc = 1;
+      } else if (*c == '\"') {
+        break;
+      } else {
+        out[o++] = *c;
+      }
+    }
+    out[o] = '\0';
+    return out;
+  }
+  return NULL;
+}
+
+// Reads one numeric field of one question's answer, scoped by question id.
+// jev_answer supersedes this for the loop; the test suite reads it directly.
+__attribute__((unused))
+static double extract_number(const char* json, const char* qid, const char* key) {
+  const char* bound = NULL;
+  const char* p = (json && qid) ? answer_span(json, qid, &bound) : NULL;
+  double v = 0.0;
+  if (p) answer_num(p, bound, key, &v);
+  return v;
+}
+
+// The answer Jev gave one question, as a typed value rather than a set of
+// positional strstr reads: the response half of the Question contract that
+// agent_primitives.bend declares as `type Answer`. Readers switch on kind, so
+// a field can no longer be read out of the wrong question (#27), and a failed
+// request is JEV_MISSING carrying its reason — not the "" that used to fall
+// through dispatch to generate_answer (#32). See #34.
+typedef enum { JEV_MISSING = 0, JEV_CHOSEN, JEV_SCORED, JEV_NOULED } JevKind;
+
+typedef struct {
+  JevKind kind;
+  char text[512];      // JEV_CHOSEN: the label; JEV_MISSING: the reason
+  double confidence;   // JEV_CHOSEN and JEV_SCORED
+  double score;        // JEV_SCORED
+  double probability;  // JEV_NOULED
+} JevAnswer;
+
+// One jev_answer per question id, switched on by every consumer: the kinds
+// stand for the three question types, and anything absent, unrecognised or
+// failed is JEV_MISSING.
+static JevAnswer jev_answer(const char* json, const char* qid) {
+  JevAnswer a;
+  a.kind = JEV_MISSING;
+  a.confidence = a.score = a.probability = 0.0;
+  a.text[0] = '\0';
+  if (!json || !*json) {
+    snprintf(a.text, sizeof(a.text), "the Classify response was empty");
+    return a;
+  }
+  const char* bound = NULL;
+  const char* p = qid ? answer_span(json, qid, &bound) : NULL;
+  if (!p) {
+    // A failed request returns an error object holding no answers at all;
+    // where it carries a message, that message is the reason. See #32.
+    char* err = answer_str(json, NULL, "\"error\":");
+    if (!err) err = answer_str(json, NULL, "\"message\":");
+    if (err) {
+      snprintf(a.text, sizeof(a.text), "Classify failed: %s", err);
+      free(err);
+    } else {
+      snprintf(a.text, sizeof(a.text), "no answer for \"%s\" in the Classify response",
+               qid ? qid : "?");
+    }
+    return a;
+  }
+  char* choice = answer_str(p, bound, "\"choice\":");
+  if (choice) {
+    a.kind = JEV_CHOSEN;
+    snprintf(a.text, sizeof(a.text), "%s", choice);
+    free(choice);
+    answer_num(p, bound, "\"confidence\":", &a.confidence);
+    return a;
+  }
+  if (answer_num(p, bound, "\"score\":", &a.score)) {
+    a.kind = JEV_SCORED;
+    answer_num(p, bound, "\"confidence\":", &a.confidence);
+    return a;
+  }
+  if (answer_num(p, bound, "\"noul\":", &a.probability)) {
+    a.kind = JEV_NOULED;
+    return a;
+  }
+  snprintf(a.text, sizeof(a.text), "unrecognised answer for \"%s\" in the Classify response", qid);
+  return a;
 }
 
 // -----------------------------------------------------------------------------
@@ -842,14 +948,47 @@ int main(int argc, char** argv) {
   for (int step = 1; step <= max_steps; step++) {
     printf("%s─── Step %d: Jev Classification ──────────────────────────────────────────%s\n", ANSI_CYAN, step, ANSI_RESET);
 
-    // 1. Classify
+    // 1. Classify — one typed answer per question, switched on rather than
+    // read positionally. See #34.
     char* c_resp = call_typesafe_classify(state);
-    char* decision = extract_choice(c_resp, "action");
-    double conf = extract_number(c_resp, "action", "\"confidence\":");
-    double score = extract_number(c_resp, "confidence_score", "\"score\":");
-    double noul = extract_number(c_resp, "has_enough_info", "\"noul\":");
-    double needs_change = extract_number(c_resp, "needs_code_change", "\"noul\":");
-    double repeats = extract_number(c_resp, "repeats", "\"noul\":");
+    JevAnswer action   = jev_answer(c_resp, "action");
+    JevAnswer info     = jev_answer(c_resp, "has_enough_info");
+    JevAnswer progress = jev_answer(c_resp, "confidence_score");
+    JevAnswer needs    = jev_answer(c_resp, "needs_code_change");
+    JevAnswer rep      = jev_answer(c_resp, "repeats");
+
+    char* decision = NULL;
+    double conf = 0.0;
+    switch (action.kind) {
+      case JEV_CHOSEN:
+        decision = strdup(action.text);
+        conf = action.confidence;
+        break;
+      case JEV_MISSING:
+        // A failed request has no answer, and halting beats the old
+        // fall-through to generate_answer, which read a 429 as a decision.
+        // See #32.
+        printf("⚠️  %sClassify returned no answer: %s Halting rather than guessing.%s\n",
+               ANSI_YELLOW, action.text, ANSI_RESET);
+        break;
+      case JEV_SCORED:
+      case JEV_NOULED:
+        printf("⚠️  %s'action' answered with the wrong type; halting rather than guessing.%s\n",
+               ANSI_YELLOW, ANSI_RESET);
+        break;
+    }
+    if (!decision) {
+      free(c_resp);
+      break;
+    }
+
+    // A question answered with the wrong type reads as zero, as an absent one
+    // did before — the answer's kind is what carries the failure now.
+    double noul = 0.0, score = 0.0, needs_change = 0.0, repeats = 0.0;
+    if (info.kind == JEV_NOULED) noul = info.probability;
+    if (progress.kind == JEV_SCORED) score = progress.score;
+    if (needs.kind == JEV_NOULED) needs_change = needs.probability;
+    if (rep.kind == JEV_NOULED) repeats = rep.probability;
 
     // Guardrail: Only override generate_answer to read_code if we haven't read any code yet (read_phase == 0).
     // Once code has been read, trust generate_answer and do not trap the agent in an infinite read loop.

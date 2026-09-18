@@ -29,7 +29,13 @@ echo "== bend expected output (#|) =="
 for f in *.bend; do
   grep -q '^#|' "$f" || continue
   want="$(grep '^#|' "$f" | sed 's/^#|//')"
-  got="$(bend "$f" 2>"$WORK/$f.err")" || { echo "FAIL: $f"; cat "$WORK/$f.err"; exit 1; }
+  # Compiled, not interpreted. A file importing the C FFI cannot run directly --
+  # "a foreign def without a .js import" -- and those are exactly the files
+  # worth testing. Compiling is also how these programs actually run.
+  bend "$f" -o "$WORK/$f.c" >/dev/null 2>"$WORK/$f.err" \
+    && gcc -std=c11 -O1 -I. "$WORK/$f.c" -lpthread -lm -o "$WORK/$f.bin" 2>>"$WORK/$f.err" \
+    || { echo "FAIL (build): $f"; cat "$WORK/$f.err"; exit 1; }
+  got="$("$WORK/$f.bin" 2>>"$WORK/$f.err")" || { echo "FAIL (run): $f"; cat "$WORK/$f.err"; exit 1; }
   [ "$got" = "$want" ] || { echo "FAIL: $f"; diff <(printf '%s\n' "$want") <(printf '%s\n' "$got") || true; exit 1; }
   echo "PASS: $f"
 done
