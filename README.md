@@ -72,10 +72,26 @@ travel as text and are parsed in `sys_c.c` — which keeps every law a plain
 Bender change its own code:
 
 ```
-Classify -> Generate an edit -> Edit applies it -> verify -> pass? keep : roll back -> Classify
+Classify -> anchor the edit -> Generate new text -> Edit applies it -> verify -> pass? keep : roll back -> Classify
 ```
 
-- **Generate an edit.** The model replies in a sentinel-delimited form
+- **Anchor the edit.** The old text is picked out of the file rather than
+  transcribed by the model: a generative model asked to reproduce a file's
+  bytes verbatim invents text that is not there (#23), and Jev generates
+  nothing, so it cannot emit wrong text. `Classify` first picks the file
+  from the repository listing — a `Choice` over a closed set, the way
+  `read_code`'s picker works — then a `Choice` over the file's line ids,
+  where each option's label is a line number and its description the line's
+  own text, plus a `Noul` for whether the file holds the thing to change at
+  all. A file longer than one page of options gets a window `Choice` first,
+  because a `Choice` caps at 255 options. Code then slices the exact bytes
+  of the chosen line and its neighbours out of the file it just read —
+  widening the window until the slice occurs exactly once — so a fabricated
+  `old_string` is impossible rather than refused. The generative model
+  writes only `new_string`, the part that is genuinely new.
+- **Fall back to the sentinel draft.** When a pick comes back absent,
+  unconfident or unusable, the edit drops to the earlier form: the model
+  replies in a sentinel-delimited block
   (`<<<PATH>>>` / `<<<OLD>>>` / `<<<NEW>>>` / `<<<END>>>`) rather than JSON,
   because an edit carries exact source text and sentinels survive the quotes,
   braces and newlines a JSON string has to escape. A change spanning files —
@@ -145,7 +161,9 @@ see the `COVERED:` note under Verify above.
 `bender_agent.c` is the agent `run_bender.sh` builds and runs: it has the full
 loop, including `apply_edit` and rollback. `bender_agent.bend` is the same loop
 written in Bend, over the primitives in `agent_primitives.bend` — its
-`apply_edit` drafts one `<<<PATH>>>`/`<<<OLD>>>`/`<<<NEW>>>` group per edit
+`apply_edit` runs the same anchor path (file `Choice`, window `Choice`, line
+`Choice` plus the presence `Noul`, then exact bytes from the file) and falls
+back to drafting one `<<<PATH>>>`/`<<<OLD>>>`/`<<<NEW>>>` group per edit
 (a reply carrying more is refused rather than half-applied), verifies with
 `BENDER_VERIFY_CMD`, and restores the `ReadFile` snapshot with `WriteFile`,
 so a file the edit created is left empty rather than removed:

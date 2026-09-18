@@ -1214,13 +1214,621 @@ static void snapshots_free(FileSnapshot* snaps, int n) {
   free(snaps);
 }
 
+// -----------------------------------------------------------------------------
+// The anchored edit: a Choice over line ids instead of a transcribed old_string
+// -----------------------------------------------------------------------------
+// apply_edit's dominant failure is fabrication: asked to copy a file's bytes
+// into old_string, a generative model invents text that is not there (#23).
+// Jev generates nothing, so it cannot emit wrong text. The line-by-line
+// search cookbook turns that into the anchor: tag each line with an id, rank
+// the ids with one Choice, and let a Noul say whether the file holds the
+// thing to change at all. tool_read already tags the lines — the "N\t"
+// prefixes are the ids — and code takes the chosen line's exact bytes from
+// the file, which is where fabrication becomes impossible rather than merely
+// recoverable. The generative model writes only new_string, the part that is
+// genuinely new. Every pick that comes back absent, unconfident or unusable
+// falls through to the sentinel draft in do_apply_edit.
+//
+// selector.bend holds the canonical thresholds and the anchor_route table;
+// this block mirrors them for the C runtime. Keep the two in step.
+
+// Lines an anchor window spans — under the 255-option cap a Choice enforces.
+#define BENDER_ANCHOR_PAGE 200
+
+// `file_to_edit` and `edit_window` confidence floors. Both pick a candidate
+// to look inside rather than an action to take, so they sit lower than the
+// action floors: a wrong pick costs one more Jev call before the sentinel
+// fallback, not a write. Not yet tuned on labeled data.
+#define BENDER_EDIT_FILE_FLOOR 0.40
+#define BENDER_EDIT_WINDOW_FLOOR 0.40
+
+// `edit_anchor` confidence floor: under it the Choice is guessing and the
+// sentinel draft takes over. Not yet tuned on labeled data.
+#define BENDER_ANCHOR_CHOICE_FLOOR 0.60
+
+// `edit_present` floor. The line-by-line cookbook measured a present answer
+// at or above 0.9 and an absent one at or below 0.05, so 0.5 separates the
+// cases it measured; treat it as a starting point to re-measure here.
+#define BENDER_ANCHOR_NOUL_FLOOR 0.50
+
+// One line of a file as a span into its buffer — the raw bytes up to the
+// '\n' (a '\r' stays in the span so window_text yields the file's exact
+// bytes; the criteria emitters drop it for display).
+typedef struct {
+  const char* p;
+  size_t len;
+} LineSpan;
+
+// Splits buf into line spans the way tool_read counts lines: split on '\n',
+// and a trailing newline yields a final empty line. Returns malloc'd spans
+// (caller frees) and sets *count.
+static LineSpan* split_lines(const char* buf, size_t len, long* count) {
+  LineSpan* spans = malloc((len + 1) * sizeof(LineSpan));
+  if (!spans) { *count = 0; return NULL; }
+  long n = 0;
+  const char* cur = buf;
+  const char* stop = buf + len;
+  while (cur <= stop) {
+    const char* nl = memchr(cur, '\n', (size_t)(stop - cur));
+    const char* end = nl ? nl : stop;
+    spans[n].p = cur;
+    spans[n].len = (size_t)(end - cur);
+    n++;
+    if (!nl) break;
+    cur = nl + 1;
+  }
+  *count = n;
+  return spans;
+}
+
+// The exact bytes of lines lo..hi (1-indexed, inclusive) joined by '\n' —
+// always text the file contains, because it is sliced out of it. The "N\t"
+// prefixes on the numbered page are for Jev's options, not for old_str.
+static char* window_text(LineSpan* lines, long lo, long hi) {
+  size_t cap = 1;
+  for (long i = lo; i <= hi; i++) cap += lines[i - 1].len + 1;
+  char* out = malloc(cap);
+  if (!out) return NULL;
+  size_t o = 0;
+  for (long i = lo; i <= hi; i++) {
+    if (o) out[o++] = '\n';
+    memcpy(out + o, lines[i - 1].p, lines[i - 1].len);
+    o += lines[i - 1].len;
+  }
+  out[o] = '\0';
+  return out;
+}
+
+// Non-overlapping occurrences of needle in haystack — the same count
+// tool_edit's uniqueness check makes, so a count of one here means one there.
+// An empty needle reads as zero, which only ever grows the window.
+static long occurs_in(const char* hay, const char* needle) {
+  if (!*needle) return 0;
+  size_t nl = strlen(needle);
+  long n = 0;
+  for (const char* p = hay; (p = strstr(p, needle)) != NULL; p += nl) n++;
+  return n;
+}
+
+// Widens the window around `line` one line in each direction per step until
+// its bytes occur exactly once in `file`. The whole-file window always does,
+// so the loop cannot run away; NULL is only an allocation failure.
+static char* unique_window(LineSpan* lines, long nlines, long line, const char* file) {
+  for (long radius = 0; radius <= nlines; radius++) {
+    long lo = line - radius;
+    if (lo < 1) lo = 1;
+    long hi = line + radius;
+    if (hi > nlines) hi = nlines;
+    char* text = window_text(lines, lo, hi);
+    if (!text) return NULL;
+    if (occurs_in(file, text) == 1) return text;
+    free(text);
+    if (lo == 1 && hi == nlines) break;
+  }
+  return NULL;
+}
+
+// The reply is the replacement text itself; one trailing newline is a
+// framing artifact of the reply rather than intended content, and it is
+// dropped.
+static char* extract_new_str(const char* reply) {
+  size_t len = strlen(reply);
+  if (len > 0 && reply[len - 1] == '\n') len--;
+  char* out = malloc(len + 1);
+  if (!out) return NULL;
+  memcpy(out, reply, len);
+  out[len] = '\0';
+  return out;
+}
+
+#define NEW_FORMAT_SYSTEM \
+  "You are Bender, an autonomous coding agent improving your own repository.\n" \
+  "The existing text to replace is given to you exactly. Reply with the " \
+  "replacement text and nothing else — no prose, no code fences, no line numbers."
+
+// One option per line of the window: the line number is the label and the
+// line's own text the description — the same shape the cookbook tags its
+// document with, and the same shape tool_read renders. A '\r' and any text
+// past 200 characters stay out of the description so one very long line
+// cannot flood the criteria.
+static int emit_line_criteria(FILE* pf, LineSpan* lines, long start, long nlines) {
+  int n = 0;
+  for (long i = start; i <= nlines && n < BENDER_ANCHOR_PAGE; i++) {
+    LineSpan* l = &lines[i - 1];
+    size_t len = l->len;
+    if (len > 0 && l->p[len - 1] == '\r') len--;
+    if (len > 200) len = 200;
+    char label[16];
+    snprintf(label, sizeof(label), "%ld", i);
+    char* desc = malloc(len + 1);
+    if (!desc) break;
+    memcpy(desc, l->p, len);
+    desc[len] = '\0';
+    if (n) fputc(',', pf);
+    fjson_string(pf, label);
+    fputc(':', pf);
+    fjson_string(pf, desc);
+    free(desc);
+    n++;
+  }
+  return n;
+}
+
+// One option per page-sized window, labelled by the line it starts at so the
+// answer parses straight back to a read offset, plus the `none` escape a
+// Choice needs to say none of the ranges hold the code.
+static int emit_window_criteria(FILE* pf, long nlines, long page) {
+  int n = 0;
+  for (long start = 1; start <= nlines; start += page) {
+    long end = start + page - 1;
+    if (end > nlines) end = nlines;
+    char label[16];
+    char desc[64];
+    snprintf(label, sizeof(label), "%ld", start);
+    snprintf(desc, sizeof(desc), "lines %ld to %ld", start, end);
+    if (n) fputc(',', pf);
+    fjson_string(pf, label);
+    fputc(':', pf);
+    fjson_string(pf, desc);
+    n++;
+  }
+  if (n) fputc(',', pf);
+  fprintf(pf, "\"none\":\"The code to change is not in any of these ranges\"");
+  return n;
+}
+
+// The edit target's file options: the same repository listing the read
+// picker offers, minus its exhaustion filter — a file read to the end is
+// still a file the change can belong in.
+static int emit_edit_file_criteria(FILE* pf, const char* listing) {
+  int n = 0;
+  const char* p = listing;
+  while (*p && n < BENDER_MAX_FILE_OPTIONS - 1) {
+    const char* eol = strchr(p, '\n');
+    size_t len = eol ? (size_t)(eol - p) : strlen(p);
+    if (len > 0 && p[len - 1] == '\r') len--;
+    if (len > 0 && len < 256) {
+      char path[256];
+      memcpy(path, p, len);
+      path[len] = '\0';
+      if (path_is_in_repo(path) && bender_exists(path) && !bender_is_dir(path)) {
+        char desc[160];
+        file_summary(path, desc, sizeof(desc));
+        if (n) fputc(',', pf);
+        fjson_string(pf, path);
+        fputc(':', pf);
+        fjson_string(pf, desc);
+        n++;
+      }
+    }
+    if (!eol) break;
+    p = eol + 1;
+  }
+  if (n) fputc(',', pf);
+  fprintf(pf, "\"none\":\"No listed file holds the code the change belongs in\"");
+  return n;
+}
+
+// One POST for one question set: the caller's emitter writes the questions
+// object's contents, and the shared tail — key, payload file, retry — is the
+// same one call_typesafe_classify and call_typesafe_pick_file use.
+static char* typesafe_request(const char* state_str,
+                              void (*emit_questions)(FILE*, void*), void* ctx) {
+  char key_buf[256];
+  const char* key = get_api_key("TYPESAFE_API_KEY", ".env.typesafe", key_buf, sizeof(key_buf));
+  if (!key) return strdup("{\"error\": \"Missing TypeSafe key\"}");
+
+  char tmp_payload[] = "/tmp/bender_ts_q_XXXXXX";
+  int fd = mkstemp(tmp_payload);
+  if (fd < 0) return strdup("{}");
+  FILE* pf = fdopen(fd, "w");
+  if (pf) {
+    fprintf(pf, "{\"model\":\"jev-1.13.0\",\"state\":");
+    fjson_string(pf, state_str);
+    fprintf(pf, ",\"questions\":{");
+    emit_questions(pf, ctx);
+    fprintf(pf, "}}");
+    fflush(pf);
+    fclose(pf);
+  }
+
+  char* resp = typesafe_post_file(key, tmp_payload);
+  unlink(tmp_payload);
+  return resp;
+}
+
+// Which file the change belongs in — a closed set, so it is a Choice, and
+// the file picked is always one the options listed.
+static void emit_edit_file_questions(FILE* pf, void* ctx) {
+  const char* listing = ctx;
+  fprintf(pf, "\"file_to_edit\":{\"type\":\"choice\",\"instructions\":");
+  fjson_string(pf, "Which single file holds the code the requested change needs to modify?");
+  fprintf(pf, ",\"criteria\":{");
+  emit_edit_file_criteria(pf, listing);
+  fprintf(pf, "}}");
+}
+
+static char* call_typesafe_edit_file(const char* state_str, const char* listing) {
+  return typesafe_request(state_str, emit_edit_file_questions, (void*)listing);
+}
+
+// Past the option cap the cookbook pages the ids: one Choice picks a window
+// of lines and a second ranks the lines inside it.
+typedef struct {
+  const char* path;
+  long nlines;
+} WindowQuestion;
+
+static void emit_edit_window_questions(FILE* pf, void* ctx) {
+  WindowQuestion* q = ctx;
+  char inst[768];
+  snprintf(inst, sizeof(inst),
+    "The change belongs in %s, which is longer than one page of options. "
+    "Which range of lines is most likely to hold the code the requested change modifies?",
+    q->path);
+  fprintf(pf, "\"edit_window\":{\"type\":\"choice\",\"instructions\":");
+  fjson_string(pf, inst);
+  fprintf(pf, ",\"criteria\":{");
+  emit_window_criteria(pf, q->nlines, BENDER_ANCHOR_PAGE);
+  fprintf(pf, "}}");
+}
+
+static char* call_typesafe_edit_window(const char* state_str, const char* path, long nlines) {
+  WindowQuestion q = { path, nlines };
+  return typesafe_request(state_str, emit_edit_window_questions, &q);
+}
+
+// The anchor itself: one Choice over the window's line ids and one Noul for
+// whether the file holds the thing to change at all — the no-match outcome a
+// sum-to-one Choice cannot express on its own.
+typedef struct {
+  const char* path;
+  LineSpan* lines;
+  long nlines;
+  long start;
+} AnchorQuestion;
+
+static void emit_anchor_questions(FILE* pf, void* ctx) {
+  AnchorQuestion* q = ctx;
+  char inst[768];
+  snprintf(inst, sizeof(inst),
+    "Which single line of %s does the requested change belong at? "
+    "The option's name is the line number; its description is the line's exact text.",
+    q->path);
+  fprintf(pf, "\"edit_anchor\":{\"type\":\"choice\",\"instructions\":");
+  fjson_string(pf, inst);
+  fprintf(pf, ",\"criteria\":{");
+  emit_line_criteria(pf, q->lines, q->start, q->nlines);
+  fprintf(pf, "}},");
+  snprintf(inst, sizeof(inst),
+    "Does %s contain the code the requested change needs to modify?", q->path);
+  fprintf(pf, "\"edit_present\":{\"type\":\"noul\",\"instructions\":");
+  fjson_string(pf, inst);
+  fprintf(pf, "}");
+}
+
+static char* call_typesafe_anchor(const char* state_str, const char* path,
+                                  LineSpan* lines, long nlines, long start) {
+  AnchorQuestion q = { path, lines, nlines, start };
+  return typesafe_request(state_str, emit_anchor_questions, &q);
+}
+
+// The single-question picks: a Choice answer reads as its label when it is
+// confident enough, and everything else — `none`, a low confidence, a missing
+// or mistyped answer — reads as no pick, which sends the caller down the
+// sentinel fallback. pick_label in selector.bend is the same reading.
+static char* jev_pick_label(JevAnswer a, double floor) {
+  if (a.kind != JEV_CHOSEN) return NULL;
+  if (a.confidence < floor) return NULL;
+  if (strcmp(a.text, "none") == 0) return NULL;
+  return strdup(a.text);
+}
+
+// A line id is all digits; strtol would take "+7" or "-3", which U32.read on
+// the Bend side does not. Keeps the two parses of the same label in step.
+static int parse_line_id(const char* s, long* out) {
+  if (!s || !*s) return 0;
+  long v = 0;
+  for (const char* p = s; *p; p++) {
+    if (!isdigit((unsigned char)*p)) return 0;
+    v = v * 10 + (*p - '0');
+    if (v > 4000000000L) return 0;
+  }
+  *out = v;
+  return 1;
+}
+
+// The anchor answers' routing table, mirroring anchor_route in
+// selector.bend: an unparseable label wins first, then absence over low
+// confidence, and only a confident anchor over a present file keeps its
+// line. Returns 1 with *out_line set, or 0 with *reason for the fallback.
+static int anchor_route(JevAnswer choice, JevAnswer noul, long* out_line,
+                        const char** reason) {
+  static char missing_buf[600];
+  if (choice.kind == JEV_MISSING) {
+    snprintf(missing_buf, sizeof(missing_buf), "Classify returned no anchor: %s", choice.text);
+    *reason = missing_buf;
+    return 0;
+  }
+  if (choice.kind != JEV_CHOSEN) {
+    *reason = "'edit_anchor' answered with the wrong type";
+    return 0;
+  }
+  long line = 0;
+  if (!parse_line_id(choice.text, &line)) {
+    *reason = "the anchor Choice named no line of the file";
+    return 0;
+  }
+  if (noul.kind != JEV_NOULED || noul.probability < BENDER_ANCHOR_NOUL_FLOOR) {
+    *reason = "the file does not contain the code the change needs";
+    return 0;
+  }
+  if (choice.confidence < BENDER_ANCHOR_CHOICE_FLOOR) {
+    *reason = "the anchor Choice was not confident enough to trust";
+    return 0;
+  }
+  *out_line = line;
+  return 1;
+}
+
+// Every bail-out lands here: the anchor could not hold, so the edit falls
+// back to the sentinel draft — which still parses and applies the old way.
+static int anchor_fallback(char* state, size_t cap, const char* reason) {
+  printf("🔀 %s[anchor] %s; drafting the sentinel edit instead.%s\n",
+         ANSI_YELLOW, reason, ANSI_RESET);
+  char note[768];
+  snprintf(note, sizeof(note),
+    "%s; the edit fell back to drafting a <<<PATH>>>/<<<OLD>>>/<<<NEW>>> block",
+    reason);
+  state_append(state, cap, "Anchor fell back", note);
+  return 0;
+}
+
+// Applies one batch of hunks as a unit: every file is snapshotted before its
+// first hunk lands, a mid-batch failure or a failed verification restores
+// all of them, and a pass is weighed against the suite's coverage manifest.
+// Caller keeps ownership of the hunks.
+static void apply_and_verify(char* state, size_t cap, EditHunk* hunks, int hunk_n) {
+  FileSnapshot* snaps = calloc((size_t)hunk_n, sizeof(FileSnapshot));
+  if (!snaps) return;
+  int snap_n = 0;
+  int applied = 1;
+  for (int i = 0; i < hunk_n; i++) {
+    EditHunk* h = &hunks[i];
+    if (!snapshot_for(snaps, &snap_n, h->path)) { applied = 0; break; }
+    printf("✏️  %sEditing '%s'...%s\n", ANSI_MAGENTA, h->path, ANSI_RESET);
+    char* result = tool_edit(h->path, h->old_str, h->new_str, 0);
+    printf("   %s\n", result);
+    char label[320];
+    snprintf(label, sizeof(label), "Edit result (%s)", h->path);
+    state_append(state, cap, label, result);
+    if (strncmp(result, "error:", 6) == 0) {
+      applied = 0;
+      free(result);
+      break;
+    }
+    free(result);
+  }
+
+  if (!applied) {
+    printf("↩️  %sRolling back the %d file(s) this edit touched.%s\n",
+           ANSI_YELLOW, snap_n, ANSI_RESET);
+    snapshots_restore(snaps, snap_n);
+    snapshots_free(snaps, snap_n);
+    return;
+  }
+
+  printf("🔬 %sVerifying: %s%s\n", ANSI_MAGENTA, verify_command(), ANSI_RESET);
+  int status = -1;
+  char* out = exec_cmd_status(verify_command(), &status);
+  if (status == 0) {
+    // A green suite is only evidence about the files it reads. The manifest
+    // run_tests.sh prints (one COVERED: line per exercised file) is checked
+    // for the file just edited; a pass over a file no check reads is reported
+    // as the weaker thing it is rather than claimed as verification. See #22.
+    // An edit is a batch now, so the weakest file decides: one hunk landing in
+    // a file no check reads is enough to make the whole pass weaker than it
+    // looks, and naming that file is what makes the warning useful.
+    int covered = 1;
+    const char* uncovered = NULL;
+    for (int i = 0; i < hunk_n; i++) {
+      int c = suite_covers(out, hunks[i].path);
+      if (c < covered) { covered = c; uncovered = hunks[i].path; }
+    }
+    if (covered == 1) {
+      printf("✅ %sVerification passed.%s\n", ANSI_GREEN, ANSI_RESET);
+      state_append(state, cap, "Verification passed", out);
+    } else {
+      char label[512];
+      if (covered == 0) {
+        snprintf(label, sizeof(label),
+          "Verification passed, but nothing in the suite exercises %s", uncovered);
+      } else {
+        snprintf(label, sizeof(label),
+          "Verification passed, but the suite reported no coverage manifest — "
+          "whether it exercises %s is unknown", uncovered ? uncovered : "the edited files");
+      }
+      printf("⚠️  %s%s.%s\n", ANSI_YELLOW, label, ANSI_RESET);
+      state_append(state, cap, label, out);
+    }
+  } else {
+    printf("❌ %sVerification failed (exit %d) — rolling the edits back.%s\n",
+           ANSI_YELLOW, status, ANSI_RESET);
+    snapshots_restore(snaps, snap_n);
+    state_append(state, cap, "Verification failed; edits rolled back", out);
+  }
+  free(out);
+  snapshots_free(snaps, snap_n);
+}
+
+// The anchor path: Jev picks the file, the line window and the anchor line,
+// code slices the exact old_str bytes out of the file it just read, and the
+// generative model writes only new_string. Returns 1 when the edit was
+// carried through (applied and verified or rolled back), 0 to fall through
+// to the sentinel draft in do_apply_edit.
+static int try_anchor_edit(char* state, size_t cap, const char* goal) {
+  printf("⚓ %sAnchoring the edit with a line-id Choice...%s\n",
+         ANSI_MAGENTA, ANSI_RESET);
+
+  // The repository listing is the file Choice's option set, the way
+  // do_read_code's picker already works; collect it if no read has yet.
+  if (!repo_listing) repo_listing = exec_cmd("git ls-files 2>/dev/null || ls -1");
+
+  char pick_state[49152];
+  snprintf(pick_state, sizeof(pick_state),
+    "Goal: %s\n\nState so far:\n%s", goal, state);
+
+  char* resp = call_typesafe_edit_file(pick_state, repo_listing);
+  JevAnswer fa = jev_answer(resp, "file_to_edit");
+  free(resp);
+  char* path = jev_pick_label(fa, BENDER_EDIT_FILE_FLOOR);
+  if (!path) return anchor_fallback(state, cap, "the file Choice named no file");
+  if (!path_is_in_repo(path)) {
+    free(path);
+    return anchor_fallback(state, cap, "the file Choice named a path outside the repository");
+  }
+
+  size_t flen = 0;
+  char* raw = bender_slurp(path, &flen);
+  if (!raw || flen == 0) {
+    free(raw);
+    free(path);
+    return anchor_fallback(state, cap, "the picked file is empty or could not be read");
+  }
+
+  long nlines = 0;
+  LineSpan* lines = split_lines(raw, flen, &nlines);
+  if (!lines || nlines == 0) {
+    free(lines);
+    free(raw);
+    free(path);
+    return anchor_fallback(state, cap, "the picked file has no lines to anchor to");
+  }
+
+  // The file was just read in full, so the read cursor says so — the
+  // blind-edit guard's intent is met, and the read picker stops offering it.
+  ReadCursor* cursor = read_cursor_for(path);
+  if (cursor) {
+    cursor->next_line = nlines + 1;
+    cursor->exhausted = 1;
+  }
+
+  // A file that fits in one page of options needs no window pick: the anchor
+  // Choice sees every line at once, as the cookbook's single-request search.
+  long start = 1;
+  if (nlines > BENDER_ANCHOR_PAGE) {
+    printf("🪟 %sPicking a window of '%s' (%ld lines)...%s\n",
+           ANSI_MAGENTA, path, nlines, ANSI_RESET);
+    resp = call_typesafe_edit_window(pick_state, path, nlines);
+    JevAnswer wa = jev_answer(resp, "edit_window");
+    free(resp);
+    char* wlabel = jev_pick_label(wa, BENDER_EDIT_WINDOW_FLOOR);
+    if (!wlabel || !parse_line_id(wlabel, &start) || start < 1 || start > nlines) {
+      free(wlabel);
+      free(lines);
+      free(raw);
+      free(path);
+      return anchor_fallback(state, cap, "the window Choice named no range of lines");
+    }
+    free(wlabel);
+  }
+
+  resp = call_typesafe_anchor(pick_state, path, lines, nlines, start);
+  JevAnswer ca = jev_answer(resp, "edit_anchor");
+  JevAnswer na = jev_answer(resp, "edit_present");
+  free(resp);
+
+  long line = 0;
+  const char* reason = NULL;
+  if (!anchor_route(ca, na, &line, &reason)) {
+    free(lines);
+    free(raw);
+    free(path);
+    return anchor_fallback(state, cap, reason);
+  }
+  if (line < 1 || line > nlines) {
+    free(lines);
+    free(raw);
+    free(path);
+    return anchor_fallback(state, cap, "the anchor named a line outside the file");
+  }
+
+  // The exact old_str bytes come out of the file that was read — this is the
+  // step that makes a fabricated old_string impossible rather than refused.
+  char* old_str = unique_window(lines, nlines, line, raw);
+  free(lines);
+  if (!old_str) {
+    free(raw);
+    free(path);
+    return anchor_fallback(state, cap, "no window around the anchor line is unique in the file");
+  }
+
+  printf("⚓ %sAnchor: '%s' line %ld; generating the replacement text...%s\n",
+         ANSI_MAGENTA, path, line, ANSI_RESET);
+  char nprompt[49152];
+  snprintf(nprompt, sizeof(nprompt),
+    "Goal: %s\n\nState so far:\n%s\n\nThe change anchors at line %ld of %s. "
+    "The exact existing text to replace is:\n%s\n"
+    "Write the replacement text and nothing else.",
+    goal, state, line, path, old_str);
+  char* gresp = call_openrouter_with_system(NEW_FORMAT_SYSTEM, nprompt);
+  char* reply = extract_content(gresp);
+  free(gresp);
+  char* new_str = extract_new_str(reply ? reply : "");
+  free(reply);
+  if (!new_str) {
+    free(old_str);
+    free(raw);
+    free(path);
+    return anchor_fallback(state, cap, "the replacement text could not be read out of the reply");
+  }
+
+  EditHunk hunk;
+  hunk.path = path;
+  hunk.old_str = old_str;
+  hunk.new_str = new_str;
+  apply_and_verify(state, cap, &hunk, 1);
+  free(new_str);
+  free(old_str);
+  free(path);
+  free(raw);
+  return 1;
+}
+
 // apply_edit: draft an edit — one or more PATH/OLD/NEW hunks — apply it with
 // the Edit tool, verify, and roll every touched file back when verification
 // fails. A change spanning files arrives as several hunks in one reply and is
 // applied as a unit: a mid-batch failure or a failed verify restores all of
 // it, which is what lets the loop keep running after a bad patch instead of
 // leaving the repo half-changed.
+//
+// The anchor path runs first: it picks the old text out of the file by line
+// id rather than asking the model to transcribe it, so a fabricated
+// old_string cannot be written. This sentinel draft stays as the fallback
+// for every pick that comes back absent, unconfident or unusable.
 static void do_apply_edit(char* state, size_t cap, const char* goal) {
+  if (try_anchor_edit(state, cap, goal)) return;
+
   printf("🛠  %sDrafting an edit via OpenRouter...%s\n", ANSI_MAGENTA, ANSI_RESET);
 
   char prompt[49152];
@@ -1271,80 +1879,7 @@ static void do_apply_edit(char* state, size_t cap, const char* goal) {
     }
   }
 
-  FileSnapshot* snaps = calloc((size_t)hunk_n, sizeof(FileSnapshot));
-  if (!snaps) {
-    free_edit_hunks(hunks, hunk_n);
-    return;
-  }
-  int snap_n = 0;
-  int applied = 1;
-  for (int i = 0; i < hunk_n; i++) {
-    EditHunk* h = &hunks[i];
-    if (!snapshot_for(snaps, &snap_n, h->path)) { applied = 0; break; }
-    printf("✏️  %sEditing '%s'...%s\n", ANSI_MAGENTA, h->path, ANSI_RESET);
-    char* result = tool_edit(h->path, h->old_str, h->new_str, 0);
-    printf("   %s\n", result);
-    char label[320];
-    snprintf(label, sizeof(label), "Edit result (%s)", h->path);
-    state_append(state, cap, label, result);
-    if (strncmp(result, "error:", 6) == 0) {
-      applied = 0;
-      free(result);
-      break;
-    }
-    free(result);
-  }
-
-  if (!applied) {
-    printf("↩️  %sRolling back the %d file(s) this edit touched.%s\n",
-           ANSI_YELLOW, snap_n, ANSI_RESET);
-    snapshots_restore(snaps, snap_n);
-    snapshots_free(snaps, snap_n);
-    free_edit_hunks(hunks, hunk_n);
-    return;
-  }
-
-  printf("🔬 %sVerifying: %s%s\n", ANSI_MAGENTA, verify_command(), ANSI_RESET);
-  int status = -1;
-  char* out = exec_cmd_status(verify_command(), &status);
-  if (status == 0) {
-    // A green suite is only evidence about the files it reads. The manifest
-    // run_tests.sh prints (one COVERED: line per exercised file) is checked
-    // for the file just edited; a pass over a file no check reads is reported
-    // as the weaker thing it is rather than claimed as verification. See #22.
-    // An edit is a batch now, so the weakest file decides: one hunk landing in
-    // a file no check reads is enough to make the whole pass weaker than it
-    // looks, and naming that file is what makes the warning useful.
-    int covered = 1;
-    const char* uncovered = NULL;
-    for (int i = 0; i < hunk_n; i++) {
-      int c = suite_covers(out, hunks[i].path);
-      if (c < covered) { covered = c; uncovered = hunks[i].path; }
-    }
-    if (covered == 1) {
-      printf("✅ %sVerification passed.%s\n", ANSI_GREEN, ANSI_RESET);
-      state_append(state, cap, "Verification passed", out);
-    } else {
-      char label[512];
-      if (covered == 0) {
-        snprintf(label, sizeof(label),
-          "Verification passed, but nothing in the suite exercises %s", uncovered);
-      } else {
-        snprintf(label, sizeof(label),
-          "Verification passed, but the suite reported no coverage manifest — "
-          "whether it exercises %s is unknown", uncovered ? uncovered : "the edited files");
-      }
-      printf("⚠️  %s%s.%s\n", ANSI_YELLOW, label, ANSI_RESET);
-      state_append(state, cap, label, out);
-    }
-  } else {
-    printf("❌ %sVerification failed (exit %d) — rolling the edits back.%s\n",
-           ANSI_YELLOW, status, ANSI_RESET);
-    snapshots_restore(snaps, snap_n);
-    state_append(state, cap, "Verification failed; edits rolled back", out);
-  }
-  free(out);
-  snapshots_free(snaps, snap_n);
+  apply_and_verify(state, cap, hunks, hunk_n);
   free_edit_hunks(hunks, hunk_n);
 }
 
