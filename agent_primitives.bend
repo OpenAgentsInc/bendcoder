@@ -33,8 +33,11 @@ def openrouter.post(payload):
 # ------------------------------------------------------------------------------
 # Low-level FFI: Subprocess & File System Tools
 # ------------------------------------------------------------------------------
+# Returns Done{output} on exit 0 and Fail{(code, output)} otherwise, mirroring
+# IO.get_env. A plain String would make a passing verification and a failing one
+# indistinguishable, which is what blocked the loop from ever rolling back.
 law command.run:
-  String -> IO(String)
+  String -> IO(Result<&1, &1, U32 & String, String>)
 
 def command.run(cmd):
   import "./sys_c.c"
@@ -182,7 +185,7 @@ def Generate(model: String, system_prompt: String, prompt: String) -> IO(String)
 # ------------------------------------------------------------------------------
 # The Tool Primitives
 # ------------------------------------------------------------------------------
-def Exec(cmd: String) -> IO(String):
+def Exec(cmd: String) -> IO(Result<&1, &1, U32 & String, String>):
   command.run(cmd)
 
 # The FFI boundary is string-only, so the numeric offset/limit and the

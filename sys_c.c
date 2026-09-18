@@ -19,6 +19,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <stdbool.h>
+#include <sys/wait.h>
 
 #include "tools_c.h"
 
@@ -31,8 +32,13 @@ typedef struct {
 // -----------------------------------------------------------------------------
 // 1. command_run: execute shell command and capture combined stdout/stderr
 // -----------------------------------------------------------------------------
+// The exit status travels beside the output in the work item, because the pack
+// needs it to choose between Done and Fail and IoWork carries no second slot.
+static int command_run_status = 0;
+
 static void command_run_worker(IoWork* w) {
   char* cmd = w->data;
+  command_run_status = 0;
   if (!cmd || strlen(cmd) == 0) {
     w->data = strdup("");
     w->size = 0;
@@ -48,6 +54,7 @@ static void command_run_worker(IoWork* w) {
   if (!pipe) {
     w->data = strdup("[Error: failed to spawn process]");
     w->size = strlen(w->data);
+    command_run_status = 127;  // the shell's "command not found"
     return;
   }
 
@@ -62,7 +69,8 @@ static void command_run_worker(IoWork* w) {
     buf.len += bytes;
     buf.data[buf.len] = '\0';
   }
-  pclose(pipe);
+  int rc = pclose(pipe);
+  command_run_status = (rc == -1) ? 127 : WEXITSTATUS(rc);
 
   if (!buf.data) {
     w->data = strdup("");
@@ -73,10 +81,21 @@ static void command_run_worker(IoWork* w) {
   }
 }
 
+// Returns Result<&1, &1, U32 & String, String>: Done{output} when the command
+// exits 0, Fail{(code, output)} otherwise. This is the shape IO.get_env already
+// uses, so a Bend caller matches on it the same way — and it is the whole point
+// of the effect, since a verification step that cannot tell a pass from a
+// failure cannot decide whether to keep an edit or roll it back.
 static Term command_run_pack(Env e, IoWork* w) {
-  Term str = io_str(e, w->data, w->size);
+  int status = command_run_status;
+  if (status == 0) {
+    Term str = io_str(e, w->data, w->size);
+    free(w->data);
+    return io_done(e, str);
+  }
+  Term t = io_fail(e, (u32)status, w->data);
   free(w->data);
-  return str;
+  return t;
 }
 
 Term command_run_run(Env e, Term* f, IoWork* w) {

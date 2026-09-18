@@ -106,9 +106,10 @@ def loop_triage_questions() -> List<&2, P.Question>:
 
 # Tool output is both shown and folded into the next round's state, so it
 # arrives reusable (`+`); affine is the default and would reject the reuse.
-def report(label: String, +out: String) -> IO(Progress):
+def report(+label: String, +out: String) -> IO(Progress):
   do IO<Progress>:
-    u1 : Unit <- IO.print("   " ++ out)
+    u1 : Unit <- IO.print(color_yellow("   " ++ label))
+    u2 : Unit <- IO.print("   " ++ out)
     IO.pure(Progress, Running{"\n[" ++ label ++ "]:\n" ++ out})
 
 # A model asked for one search string routinely prepends its reasoning, so the
@@ -144,11 +145,28 @@ def act_search_code(state: String) -> IO(Progress):
     )
     search_with(pick_last(String.lines(reply), ""))
 
+# Exec returns Done{output} or Fail{(code, output)}, so the loop can finally
+# tell a passing verification from a failing one. A match scrutinizes only a
+# parameter, hence the split.
+def verify_failed(codeout: U32 & String) -> IO(Progress):
+  (code, out) = codeout
+  report("Verification FAILED (exit " ++ U32.show(code) ++ ")", out)
+
+def verify_passed(out: String) -> IO(Progress):
+  report("Verification passed", out)
+
+def report_verify(r: Result<&1, &1, U32 & String, String>) -> IO(Progress):
+  match r:
+    case Fail{e}:
+      verify_failed(e)
+    case Done{v}:
+      verify_passed(v)
+
 def act_run_build() -> IO(Progress):
   do IO<Progress>:
     u1 : Unit <- IO.print(color_magenta("[TOOL EXEC] Running verification: './run_tests.sh' ..."))
-    out : String <- P.Exec("./run_tests.sh")
-    report("Verification Output", out)
+    r : Result<&1, &1, U32 & String, String> <- P.Exec("./run_tests.sh")
+    report_verify(r)
 
 def act_read_code() -> IO(Progress):
   do IO<Progress>:
