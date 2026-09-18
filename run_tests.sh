@@ -34,6 +34,11 @@ for f in *.bend; do
   echo "PASS: $f"
 done
 
+# The action space's parse/show round-trip is a proved law; checking the
+# module is what makes it a gate rather than a comment.
+echo "== action.bend proves its laws =="
+bend action.bend >/dev/null
+
 # bender_agent.bend uses only some of the laws sys_c.c defines, so this also
 # guards the #ifdef CID_* guards in sys_c.c against regressing (issue #5).
 echo "== bender_agent.bend checks and builds =="

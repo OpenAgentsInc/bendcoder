@@ -1,5 +1,6 @@
 import Base
 import ./agent_primitives.bend as P
+import ./action.bend as A
 
 # ==============================================================================
 # Bender: Autonomous Coding Agent Loop & Terminal UI
@@ -86,11 +87,11 @@ def loop_triage_questions() -> List<&2, P.Question>:
       "action",
       "Based on the current state, what is the single next best action to advance or verify the task?",
       [
-        P.Opt{"read_code", "Read source code or repository files to understand context or inspect implementations"},
-        P.Opt{"search_code", "Search the repository for a literal string to find which files are relevant"},
-        P.Opt{"run_build", "Run build, compile, or test command to check if code works or reproduces an error"},
-        P.Opt{"generate_fix", "Synthesize code, write a patch, or generate a fix using the LLM"},
-        P.Opt{"task_complete", "The task is successfully resolved, verified, and complete"},
+        P.Opt{A.show_action(A.ReadCode{}), "Read source code or repository files to understand context or inspect implementations"},
+        P.Opt{A.show_action(A.SearchCode{}), "Search the repository for a literal string to find which files are relevant"},
+        P.Opt{A.show_action(A.RunBuild{}), "Run build, compile, or test command to check if code works or reproduces an error"},
+        P.Opt{A.show_action(A.GenerateAnswer{}), "Synthesize code, write a patch, or generate a fix using the LLM"},
+        P.Opt{A.show_action(A.TaskComplete{}), "The task is successfully resolved, verified, and complete"},
         P.Opt{"none", "No listed action fits: the state does not yet support a next step"}
       ]
     },
@@ -170,7 +171,7 @@ def act_read_code() -> IO(Progress):
     content : String <- P.Read("hello.bend", 1, 200)
     report("hello.bend (lines 1-200)", content)
 
-def act_generate_fix(state: String) -> IO(Progress):
+def act_generate_answer(state: String) -> IO(Progress):
   do IO<Progress>:
     u1 : Unit <- IO.print(color_magenta("[TOOL GENERATE] Calling LLM (OpenRouter) to generate code ..."))
     gen : String <- GenerateText(
@@ -180,45 +181,37 @@ def act_generate_fix(state: String) -> IO(Progress):
     )
     report("Generated Plan", gen)
 
-# A match can only scrutinize a parameter or a field, never a computed value,
-# so the equality tests are made by the caller and dispatched on here.
-def dispatch_action(
-  is_complete: Bool, is_none: Bool, is_build: Bool, is_read: Bool, is_search: Bool,
-  state: String
-) -> IO(Progress):
-  match is_complete:
-    case True{}:
+# The action arrives already decoded: is_none keeps "none" (a real decision —
+# no listed action fits) distinct from None{} (a decision string no action
+# owns, which used to fall through to generate_answer), and the match is
+# exhaustive over the Action type.
+def dispatch_action(is_none: Bool, a: Maybe<&2, A.Action>, state: String) -> IO(Progress):
+  match is_none a:
+    case True{} _:
+      IO.pure(Progress, Stalled{"Classify reported that no listed action fits the current state."})
+    case _ None{}:
+      IO.pure(Progress, Stalled{"Classify returned a decision that names no action."})
+    case _ Some{A.ReadCode{}}:
+      act_read_code()
+    case _ Some{A.SearchCode{}}:
+      act_search_code(state)
+    case _ Some{A.RunBuild{}}:
+      act_run_build()
+    case _ Some{A.ApplyEdit{}}:
+      report("apply_edit unavailable", "apply_edit is not implemented in the Bend loop yet; choose another action.")
+    case _ Some{A.GenerateAnswer{}}:
+      act_generate_answer(state)
+    case _ Some{A.TaskComplete{}}:
       IO.pure(Progress, Finished{})
-    case False{}:
-      match is_none:
-        case True{}:
-          IO.pure(Progress, Stalled{"Classify reported that no listed action fits the current state."})
-        case False{}:
-          match is_build:
-            case True{}:
-              act_run_build()
-            case False{}:
-              match is_read:
-                case True{}:
-                  act_read_code()
-                case False{}:
-                  match is_search:
-                    case True{}:
-                      act_search_code(state)
-                    case False{}:
-                      act_generate_fix(state)
 
-# `decision` is printed once and compared three times, hence `+`.
+# `decision` is printed once, compared once and parsed once, hence `+`.
 def run_action(+decision: String, state: String) -> IO(Progress):
   do IO<Progress>:
     u1 : Unit <- IO.print(color_yellow("[Classify Decision] ") ++ color_bold(decision))
     u2 : Unit <- IO.print("")
     dispatch_action(
-      String.eq(decision, "task_complete"),
       String.eq(decision, "none"),
-      String.eq(decision, "run_build"),
-      String.eq(decision, "read_code"),
-      String.eq(decision, "search_code"),
+      A.parse_action(decision),
       state
     )
 
