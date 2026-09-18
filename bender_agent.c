@@ -532,7 +532,9 @@ static void do_search_code(char* state, size_t cap, const char* goal) {
 static void do_read_code(char* state, size_t cap, const char* goal, int read_phase) {
   if (read_phase == 0) {
     printf("📖 %sListing repository contents...%s\n", ANSI_MAGENTA, ANSI_RESET);
-    char* listing = exec_cmd("ls -1");
+    // Tracked files only: ls -1 shows build output that no edit will touch and
+    // that reads as plausible source. See #36.
+    char* listing = exec_cmd("git ls-files 2>/dev/null || ls -1");
     state_append(state, cap, "Repository files", listing);
     free(listing);
     char* readme = tool_read("README.md", 1, 80);

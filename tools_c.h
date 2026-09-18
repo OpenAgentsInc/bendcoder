@@ -605,7 +605,53 @@ static void grep_file(GrepSink* g, const char* pattern, const char* path, const 
   free(text);
 }
 
-static void grep_tree(GrepSink* g, const char* pattern, const char* dir) {
+// Tracked files only, the way ripgrep searches by default. A working directory
+// holds build output that git ignores but a tree walk does not: here, 450 KB of
+// generated C that is larger than the entire source tree and full of plausible
+// matches. `git ls-files` answers this authoritatively; outside a repository
+// the set stays empty and everything is searched, which is the right fallback.
+static char* tracked_files = NULL;
+
+static void tracked_files_load(void) {
+  if (tracked_files) return;
+  FILE* p = popen("git ls-files 2>/dev/null", "r");
+  if (!p) { tracked_files = strdup(""); return; }
+  size_t cap = 8192, len = 0;
+  char* buf = (char*)malloc(cap);
+  if (!buf) { pclose(p); tracked_files = strdup(""); return; }
+  buf[0] = '\n';
+  len = 1;
+  char line[1024];
+  while (fgets(line, sizeof(line), p)) {
+    size_t l = strlen(line);
+    if (len + l + 2 > cap) {
+      cap = (len + l + 2) * 2;
+      char* grown = (char*)realloc(buf, cap);
+      if (!grown) break;
+      buf = grown;
+    }
+    memcpy(buf + len, line, l);
+    len += l;
+    if (line[l - 1] != '\n') buf[len++] = '\n';
+  }
+  pclose(p);
+  buf[len] = '\0';
+  tracked_files = buf;
+}
+
+// Empty set means "not a repository": search everything rather than nothing.
+static int is_tracked(const char* path) {
+  tracked_files_load();
+  if (!tracked_files || tracked_files[1] == '\0') return 1;
+  char needle[1200];
+  snprintf(needle, sizeof(needle), "\n%s\n", path);
+  return strstr(tracked_files, needle) != NULL;
+}
+
+// `tracked_only` is set when the search root is a relative path, i.e. inside
+// this repository. An absolute path is somewhere else entirely and the
+// repository's tracked set says nothing useful about it.
+static void grep_tree(GrepSink* g, const char* pattern, const char* dir, int tracked_only) {
   if (g->truncated || g->failed) return;
   DIR* d = opendir(dir);
   if (!d) return;
@@ -620,8 +666,8 @@ static void grep_tree(GrepSink* g, const char* pattern, const char* dir) {
       snprintf(child, sizeof(child), "%s/%s", dir, entry->d_name);
     }
     if (bender_is_dir(child)) {
-      grep_tree(g, pattern, child);
-    } else {
+      grep_tree(g, pattern, child, tracked_only);
+    } else if (!tracked_only || is_tracked(child)) {
       grep_file(g, pattern, child, child);
     }
     if (g->truncated || g->failed) break;
@@ -641,7 +687,7 @@ static char* tool_grep(const char* pattern, const char* path) {
 
   GrepSink g = {NULL, 0, 0, 0, 0, 0};
   if (bender_is_dir(path)) {
-    grep_tree(&g, pattern, path);
+    grep_tree(&g, pattern, path, path[0] != '/');
   } else {
     grep_file(&g, pattern, path, NULL);
   }

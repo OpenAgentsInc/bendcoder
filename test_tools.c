@@ -200,6 +200,21 @@ int main(void) {
         "tool_grep on a directory searches the tree and labels hits with the path");
   free(g3);
 
+  // A tree search covers tracked files only, so generated output cannot crowd
+  // out the source it was generated from.
+  char* g_tracked = tool_grep("BENDER_GREP_MAX_MATCHES", ".");
+  check(g_tracked && strstr(g_tracked, "tools_c.h:") != NULL,
+        "a tree search finds tracked source");
+  check(g_tracked && strstr(g_tracked, "agent_primitives.c:") == NULL,
+        "a tree search skips generated, untracked files");
+  free(g_tracked);
+  // The tracked filter is about this repository; an absolute path is somewhere
+  // else and must not be filtered by it, or scratch directories vanish.
+  char* g_abs = tool_grep("NINE", "/tmp/bender_tool_test");
+  check(g_abs && strstr(g_abs, "f.txt:4:NINE") != NULL,
+        "an absolute path is searched without the tracked filter");
+  free(g_abs);
+
   char* g4 = tool_grep("", tmp);
   check(strncmp(g4, "error:", 6) == 0, "tool_grep refuses an empty pattern");
   free(g4);
