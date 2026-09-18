@@ -139,6 +139,74 @@ static long classify_retry_wait_ms(const char* header_path, int attempt) {
   return wait_ms;
 }
 
+// One JSON string escaper for every payload: the state, OpenRouter message
+// contents, and the option labels and descriptions in a Choice's criteria all
+// escape the same way, so they all go through here.
+static void fjson_string(FILE* pf, const char* s) {
+  fputc('\"', pf);
+  for (const char* p = s; *p; p++) {
+    if (*p == '\"') fputs("\\\"", pf);
+    else if (*p == '\\') fputs("\\\\", pf);
+    else if (*p == '\n') fputs("\\n", pf);
+    else if (*p == '\r') fputs("\\r", pf);
+    else if (*p == '\t') fputs("\\t", pf);
+    else fputc(*p, pf);
+  }
+  fputc('\"', pf);
+}
+
+// The shared tail of every System One call: POST a prepared payload file.
+// Status and headers are captured apart from the body: 429/529 need the
+// headers to know how long to wait, and any failure needs its status and body
+// logged — an unparseable response already halts the loop, but without this
+// there is no way to tell a rate limit from a 422 or a malformed reply.
+static char* typesafe_post_file(const char* key, const char* payload_path) {
+  char hdr_path[] = "/tmp/bender_ts_hdr_XXXXXX";
+  char body_path[] = "/tmp/bender_ts_body_XXXXXX";
+  int hfd = mkstemp(hdr_path);
+  int bfd = mkstemp(body_path);
+  if (hfd < 0 || bfd < 0) {
+    if (hfd >= 0) close(hfd);
+    if (bfd >= 0) close(bfd);
+    return strdup("{}");
+  }
+  close(hfd);
+  close(bfd);
+
+  int status = 0;
+  int attempt;
+  for (attempt = 1; attempt <= BENDER_TS_MAX_ATTEMPTS; attempt++) {
+    char cmd[4096];
+    snprintf(cmd, sizeof(cmd),
+      "curl -s -X POST https://api.typesafe.ai/v1/systemone "
+      "-H 'Authorization: Bearer %s' "
+      "-H 'Content-Type: application/json' "
+      "-D %s -o %s -w '%%{http_code}' "
+      "-d @%s",
+      key, hdr_path, body_path, payload_path);
+    char* code = exec_cmd(cmd);
+    status = atoi(code);
+    free(code);
+    if ((status != 429 && status != 529) || attempt == BENDER_TS_MAX_ATTEMPTS) break;
+    long wait_ms = classify_retry_wait_ms(hdr_path, attempt - 1);
+    fprintf(stderr, "%s[typesafe] HTTP %d; retrying in %ld ms (attempt %d of %d)%s\n",
+            ANSI_YELLOW, status, wait_ms, attempt + 1, BENDER_TS_MAX_ATTEMPTS, ANSI_RESET);
+    struct timespec ts = { wait_ms / 1000, (wait_ms % 1000) * 1000000L };
+    nanosleep(&ts, NULL);
+  }
+
+  char* resp = bender_slurp(body_path, NULL);
+  if (!resp) resp = strdup("{}");
+  if (status < 200 || status >= 300) {
+    fprintf(stderr, "%s[typesafe] request failed: HTTP %d after %d attempt(s); body: %.400s%s\n",
+            ANSI_YELLOW, status, attempt, resp, ANSI_RESET);
+  }
+
+  unlink(hdr_path);
+  unlink(body_path);
+  return resp;
+}
+
 // Call TypeSafe System One
 static char* call_typesafe_classify(const char* state_str) {
   char key_buf[256];
@@ -151,16 +219,8 @@ static char* call_typesafe_classify(const char* state_str) {
   FILE* pf = fdopen(fd, "w");
   if (pf) {
     fprintf(pf, "{\"model\":\"jev-1.13.0\",\"state\":");
-    fputc('\"', pf);
-    for (const char* p = state_str; *p; p++) {
-      if (*p == '\"') fputs("\\\"", pf);
-      else if (*p == '\\') fputs("\\\\", pf);
-      else if (*p == '\n') fputs("\\n", pf);
-      else if (*p == '\r') fputs("\\r", pf);
-      else if (*p == '\t') fputs("\\t", pf);
-      else fputc(*p, pf);
-    }
-    fprintf(pf, "\",\"questions\":{"
+    fjson_string(pf, state_str);
+    fprintf(pf, ",\"questions\":{"
       "\"action\":{\"type\":\"choice\",\"instructions\":\"Given the user question or goal and current state, what is the single next best action to take?\","
       "\"criteria\":{"
         "\"%s\":\"Inspect files, repository contents, or directory listings to gather needed facts\","
@@ -184,55 +244,8 @@ static char* call_typesafe_classify(const char* state_str) {
     fclose(pf);
   }
 
-  // Status and headers are captured apart from the body: 429/529 need the
-  // headers to know how long to wait, and any failure needs its status and body
-  // logged — an unparseable response already halts the loop, but without this
-  // there is no way to tell a rate limit from a 422 or a malformed reply.
-  char hdr_path[] = "/tmp/bender_ts_hdr_XXXXXX";
-  char body_path[] = "/tmp/bender_ts_body_XXXXXX";
-  int hfd = mkstemp(hdr_path);
-  int bfd = mkstemp(body_path);
-  if (hfd < 0 || bfd < 0) {
-    if (hfd >= 0) close(hfd);
-    if (bfd >= 0) close(bfd);
-    unlink(tmp_payload);
-    return strdup("{}");
-  }
-  close(hfd);
-  close(bfd);
-
-  int status = 0;
-  int attempt;
-  for (attempt = 1; attempt <= BENDER_TS_MAX_ATTEMPTS; attempt++) {
-    char cmd[4096];
-    snprintf(cmd, sizeof(cmd),
-      "curl -s -X POST https://api.typesafe.ai/v1/systemone "
-      "-H 'Authorization: Bearer %s' "
-      "-H 'Content-Type: application/json' "
-      "-D %s -o %s -w '%%{http_code}' "
-      "-d @%s",
-      key, hdr_path, body_path, tmp_payload);
-    char* code = exec_cmd(cmd);
-    status = atoi(code);
-    free(code);
-    if ((status != 429 && status != 529) || attempt == BENDER_TS_MAX_ATTEMPTS) break;
-    long wait_ms = classify_retry_wait_ms(hdr_path, attempt - 1);
-    fprintf(stderr, "%s[typesafe] HTTP %d; retrying in %ld ms (attempt %d of %d)%s\n",
-            ANSI_YELLOW, status, wait_ms, attempt + 1, BENDER_TS_MAX_ATTEMPTS, ANSI_RESET);
-    struct timespec ts = { wait_ms / 1000, (wait_ms % 1000) * 1000000L };
-    nanosleep(&ts, NULL);
-  }
-
-  char* resp = bender_slurp(body_path, NULL);
-  if (!resp) resp = strdup("{}");
-  if (status < 200 || status >= 300) {
-    fprintf(stderr, "%s[typesafe] classify failed: HTTP %d after %d attempt(s); body: %.400s%s\n",
-            ANSI_YELLOW, status, attempt, resp, ANSI_RESET);
-  }
-
+  char* resp = typesafe_post_file(key, tmp_payload);
   unlink(tmp_payload);
-  unlink(hdr_path);
-  unlink(body_path);
   return resp;
 }
 
@@ -255,26 +268,10 @@ static char* call_openrouter_with_system(const char* system_prompt, const char* 
   if (pf) {
     fprintf(pf, "{\"model\":\"%s\",\"models\":[\"%s\",\"%s\"],\"messages\":["
       "{\"role\":\"system\",\"content\":", model, model, backup);
-    fputc('\"', pf);
-    for (const char* p = system_prompt; *p; p++) {
-      if (*p == '\"') fputs("\\\"", pf);
-      else if (*p == '\\') fputs("\\\\", pf);
-      else if (*p == '\n') fputs("\\n", pf);
-      else if (*p == '\r') fputs("\\r", pf);
-      else if (*p == '\t') fputs("\\t", pf);
-      else fputc(*p, pf);
-    }
-    fputs("\"},{\"role\":\"user\",\"content\":", pf);
-    fputc('\"', pf);
-    for (const char* p = prompt; *p; p++) {
-      if (*p == '\"') fputs("\\\"", pf);
-      else if (*p == '\\') fputs("\\\\", pf);
-      else if (*p == '\n') fputs("\\n", pf);
-      else if (*p == '\r') fputs("\\r", pf);
-      else if (*p == '\t') fputs("\\t", pf);
-      else fputc(*p, pf);
-    }
-    fputs("\"}]}", pf);
+    fjson_string(pf, system_prompt);
+    fputs("},{\"role\":\"user\",\"content\":", pf);
+    fjson_string(pf, prompt);
+    fputs("}]}", pf);
     fflush(pf);
     fclose(pf);
   }
@@ -663,44 +660,10 @@ static void trim_inplace(char* s) {
   }
 }
 
-// A model that leaks its reasoning into the answer is the normal case, not the
-// exception, so the picker's reply is mined for a path rather than trusted as
-// one: the last token that names a file which actually exists wins. Returns a
-// malloc'd path, or NULL when the reply contains no usable one.
-static char* extract_existing_path(const char* reply) {
-  size_t len = strlen(reply);
-  char* buf = malloc(len + 1);
-  if (!buf) return NULL;
-
-  char* best = NULL;
-  size_t i = 0;
-  while (i < len) {
-    // Tokens are split on whitespace and on the punctuation a sentence leaves
-    // around a path ("...read test_tools.c content via..." yields the path).
-    while (i < len && (isspace((unsigned char)reply[i]) || strchr("`'\"(),:;", reply[i]))) i++;
-    size_t start = i;
-    while (i < len && !isspace((unsigned char)reply[i]) && !strchr("`'\"(),:;", reply[i])) i++;
-    size_t tok_len = i - start;
-    if (tok_len == 0 || tok_len > len) continue;
-    memcpy(buf, reply + start, tok_len);
-    buf[tok_len] = '\0';
-    // Trailing sentence punctuation is not part of the name.
-    while (tok_len > 0 && (buf[tok_len - 1] == '.' || buf[tok_len - 1] == '!' ||
-                           buf[tok_len - 1] == '?')) {
-      buf[--tok_len] = '\0';
-    }
-    if (tok_len == 0) continue;
-    if (!path_is_in_repo(buf) || !bender_exists(buf) || bender_is_dir(buf)) continue;
-    free(best);
-    best = strdup(buf);
-  }
-  free(buf);
-  return best;
-}
-
-// The picker for a search pattern has the same leaked-reasoning problem as the
-// one for a path, but a pattern cannot be validated against the filesystem, so
-// the last non-empty line is taken and stripped of the quoting a model wraps it
+// A model asked for one search string routinely prepends its reasoning, and a
+// pattern cannot be validated against the filesystem the way a path could — it
+// is open-ended text, which is why it stays with the generation model — so the
+// last non-empty line is taken and stripped of the quoting a model wraps it
 // in. Returns a malloc'd pattern, or NULL when there is nothing usable.
 static char* extract_search_pattern(const char* reply) {
   const char* end = reply + strlen(reply);
@@ -765,7 +728,7 @@ static ReadCursor* read_cursor_for(const char* path) {
   return c;
 }
 
-// Describes what has already been read, so the model can ask for the next page
+// Describes what has already been read, so Jev can ask for the next page
 // of a file it has seen part of, or move on from one it has seen all of.
 static void describe_reads(char* out, size_t cap) {
   size_t o = 0;
@@ -785,6 +748,97 @@ static void describe_reads(char* out, size_t cap) {
         c->path, c->next_line - 1);
     }
   }
+}
+
+// The cheapest one-line summary a file offers is its first line; giving every
+// option the same-shaped description is what lets a Choice contrast them
+// (design rule 4). A control byte in the first "line" means it is binary
+// noise, not a summary.
+static void file_summary(const char* path, char* out, size_t cap) {
+  out[0] = '\0';
+  FILE* f = fopen(path, "r");
+  if (f) {
+    if (!fgets(out, (int)cap, f)) out[0] = '\0';
+    fclose(f);
+  }
+  size_t len = strlen(out);
+  while (len > 0 && (out[len - 1] == '\n' || out[len - 1] == '\r' ||
+                   out[len - 1] == ' ' || out[len - 1] == '\t')) {
+    out[--len] = '\0';
+  }
+  for (size_t i = 0; i < len; i++) {
+    if ((unsigned char)out[i] < 0x20 && out[i] != '\t') { out[0] = '\0'; break; }
+  }
+  if (out[0] == '\0') snprintf(out, cap, "(no descriptive first line)");
+}
+
+// One option per path in the repository listing, each described by its first
+// line, plus the `none` escape hatch a Choice needs in order to say nothing
+// fits (#26). A file already read to the end is not offered again. A Jev
+// Choice caps at 255 options; `none` always keeps a slot. Returns the number
+// of file options emitted.
+#define BENDER_MAX_FILE_OPTIONS 255
+
+static int emit_file_criteria(FILE* pf, const char* listing) {
+  int n = 0;
+  const char* p = listing;
+  while (*p && n < BENDER_MAX_FILE_OPTIONS - 1) {
+    const char* eol = strchr(p, '\n');
+    size_t len = eol ? (size_t)(eol - p) : strlen(p);
+    if (len > 0 && p[len - 1] == '\r') len--;
+    if (len > 0 && len < 256) {
+      char path[256];
+      memcpy(path, p, len);
+      path[len] = '\0';
+      ReadCursor* c = read_cursor_find(path);
+      if (path_is_in_repo(path) && bender_exists(path) && !bender_is_dir(path) &&
+          !(c && c->exhausted)) {
+        char desc[160];
+        file_summary(path, desc, sizeof(desc));
+        if (n) fputc(',', pf);
+        fjson_string(pf, path);
+        fputc(':', pf);
+        fjson_string(pf, desc);
+        n++;
+      }
+    }
+    if (!eol) break;
+    p = eol + 1;
+  }
+  if (n) fputc(',', pf);
+  fprintf(pf, "\"none\":\"No repository file is worth reading for this goal right now\"");
+  return n;
+}
+
+// Which file to read next is a closed set — the repository listing — so it is
+// a Choice, not generated text: Jev cannot name a file that is not an option,
+// which deletes the leaked-reasoning mining the old generative picker needed.
+// Returns the response body; the caller reads the "file_to_read" choice out
+// of it.
+static char* call_typesafe_pick_file(const char* state_str, const char* listing) {
+  char key_buf[256];
+  const char* key = get_api_key("TYPESAFE_API_KEY", ".env.typesafe", key_buf, sizeof(key_buf));
+  if (!key) return strdup("{\"error\": \"Missing TypeSafe key\"}");
+
+  char tmp_payload[] = "/tmp/bender_ts_pick_XXXXXX";
+  int fd = mkstemp(tmp_payload);
+  if (fd < 0) return strdup("{}");
+  FILE* pf = fdopen(fd, "w");
+  if (pf) {
+    fprintf(pf, "{\"model\":\"jev-1.13.0\",\"state\":");
+    fjson_string(pf, state_str);
+    fprintf(pf, ",\"questions\":{\"file_to_read\":{\"type\":\"choice\","
+      "\"instructions\":\"Which single repository file is most worth reading "
+      "next to advance the goal?\",\"criteria\":{");
+    emit_file_criteria(pf, listing);
+    fprintf(pf, "}}}}");
+    fflush(pf);
+    fclose(pf);
+  }
+
+  char* resp = typesafe_post_file(key, tmp_payload);
+  unlink(tmp_payload);
+  return resp;
 }
 
 // search_code: ask for a literal string, then grep the repository for it. This
@@ -819,75 +873,21 @@ static void do_search_code(char* state, size_t cap, const char* goal) {
   free(pattern);
 }
 
-// read_code: let the model name the file worth reading next, then serve it
-// with line numbers. The first read lists the repository instead, so the
-// choice is made against what is actually there.
-static void do_read_code(char* state, size_t cap, const char* goal, int read_phase) {
-  if (read_phase == 0) {
-    printf("📖 %sListing repository contents...%s\n", ANSI_MAGENTA, ANSI_RESET);
-    // Tracked files only: ls -1 shows build output that no edit will touch and
-    // that reads as plausible source. See #36.
-    char* listing = exec_cmd("git ls-files 2>/dev/null || ls -1");
-    state_append(state, cap, "Repository files", listing);
-    free(listing);
-    char* readme = tool_read("README.md", 1, 80);
-    state_append(state, cap, "README.md (lines 1-80)", readme);
-    free(readme);
-    return;
-  }
+// The repository listing from the first read, kept because it is also the
+// file Choice's option set on every later read.
+static char* repo_listing = NULL;
 
-  // A refused edit already named the file it needed; serve that rather than
-  // asking a model to guess again.
-  if (pending_read[0]) {
-    char* wanted = strdup(pending_read);
-    pending_read[0] = '\0';
-    ReadCursor* c = read_cursor_for(wanted);
-    long from = c ? c->next_line : 1;
-    printf("📖 %sReading '%s' from line %ld (named by the refused edit)...%s\n",
-           ANSI_MAGENTA, wanted, from, ANSI_RESET);
-    char* text = tool_read(wanted, from, BENDER_READ_PAGE);
-    char label[512];
-    snprintf(label, sizeof(label), "%s (from line %ld)", wanted, from);
-    state_append(state, cap, label, text);
-    if (c) c->next_line = from + BENDER_READ_PAGE;
-    free(text);
-    free(wanted);
-    return;
-  }
-
-  char already[4096];
-  describe_reads(already, sizeof(already));
-
-  char prompt[49152];
-  snprintf(prompt, sizeof(prompt),
-    "Goal: %s\n\n%s\n\n"
-    "Name the single file most worth reading next to advance this goal. "
-    "Reply with the relative path and nothing else.\n\nState so far:\n%s",
-    goal, already, state);
-  char* resp = call_openrouter_with_system(
-    "You pick one file to read. Reply with a bare relative path, nothing else.",
-    prompt);
-  char* reply = extract_content(resp);
-  free(resp);
-
-  char* path = extract_existing_path(reply);
-  if (!path) {
-    printf("🚫 %sNo readable file named in the reply.%s\n", ANSI_YELLOW, ANSI_RESET);
-    state_append(state, cap, "Read failed",
-      "The reply named no file that exists in this repository. Reply with a bare relative path.");
-    free(reply);
-    return;
-  }
-  free(reply);
-
+// Serves the next page of path into the state. A warning back from Read means
+// the offset ran past the end: the file is done, and saying so is more use to
+// the model than the warning itself.
+static void serve_read_page(char* state, size_t cap, const char* path, const char* why) {
   ReadCursor* cursor = read_cursor_for(path);
   long offset = cursor ? cursor->next_line : 1;
 
-  printf("📖 %sReading '%s' from line %ld...%s\n", ANSI_MAGENTA, path, offset, ANSI_RESET);
+  printf("📖 %sReading '%s' from line %ld%s...%s\n",
+         ANSI_MAGENTA, path, offset, why, ANSI_RESET);
   char* content = tool_read(path, offset, BENDER_READ_PAGE);
 
-  // A warning back from Read means the offset ran past the end: the file is
-  // done, and saying so is more use to the model than the warning itself.
   int past_end = strncmp(content, "<system-reminder>Warning: the file exists but is shorter", 55) == 0;
   if (past_end && cursor) {
     cursor->exhausted = 1;
@@ -900,8 +900,81 @@ static void do_read_code(char* state, size_t cap, const char* goal, int read_pha
     state_append(state, cap, label, content);
     if (cursor) cursor->next_line = offset + BENDER_READ_PAGE;
   }
-
   free(content);
+}
+
+// read_code: the first read lists the repository and serves the README; later
+// reads hand that listing to Jev as a Choice, so the file picked is always one
+// that exists and no generation call is spent naming it.
+static void do_read_code(char* state, size_t cap, const char* goal, int read_phase) {
+  if (read_phase == 0) {
+    printf("📖 %sListing repository contents...%s\n", ANSI_MAGENTA, ANSI_RESET);
+    // Tracked files only: ls -1 shows build output that no edit will touch and
+    // that reads as plausible source. See #36.
+    char* listing = exec_cmd("git ls-files 2>/dev/null || ls -1");
+    state_append(state, cap, "Repository files", listing);
+    free(repo_listing);
+    repo_listing = listing;
+    char* readme = tool_read("README.md", 1, 80);
+    state_append(state, cap, "README.md (lines 1-80)", readme);
+    free(readme);
+    return;
+  }
+
+  // A refused edit already named the file it needed; serve that rather than
+  // asking again.
+  if (pending_read[0]) {
+    char wanted[256];
+    snprintf(wanted, sizeof(wanted), "%s", pending_read);
+    pending_read[0] = '\0';
+    serve_read_page(state, cap, wanted, " (named by the refused edit)");
+    return;
+  }
+
+  // Phase 0 always collects the listing, but a picker with no options is no
+  // picker — collect it here if a run somehow got this far without one.
+  if (!repo_listing) repo_listing = exec_cmd("git ls-files 2>/dev/null || ls -1");
+
+  char already[4096];
+  describe_reads(already, sizeof(already));
+
+  char pick_state[49152];
+  snprintf(pick_state, sizeof(pick_state),
+    "Goal: %s\n\n%s\n\nState so far:\n%s", goal, already, state);
+  char* resp = call_typesafe_pick_file(pick_state, repo_listing);
+  // The typed accessor from #34 rather than a raw field read: a failed request
+  // is JEV_MISSING and must not read as a filename.
+  JevAnswer picked = jev_answer(resp, "file_to_read");
+  free(resp);
+  char* path = strdup(picked.kind == JEV_CHOSEN ? picked.text : "");
+
+  if (path[0] == '\0') {
+    printf("🚫 %sThe file Choice returned nothing; the request may have failed.%s\n",
+           ANSI_YELLOW, ANSI_RESET);
+    state_append(state, cap, "Read failed",
+      "Classify returned no file choice; the request may have failed.");
+    free(path);
+    return;
+  }
+  if (strcmp(path, "none") == 0) {
+    printf("🚫 %sJev found no file worth reading.%s\n", ANSI_YELLOW, ANSI_RESET);
+    state_append(state, cap, "Read skipped",
+      "The file Choice answered 'none': no repository file is worth reading for this goal right now.");
+    free(path);
+    return;
+  }
+  // The options came from the listing itself, so a name that fails the guard
+  // is a malformed reply, not a missing file.
+  if (!path_is_in_repo(path) || !bender_exists(path) || bender_is_dir(path)) {
+    printf("🚫 %sThe file Choice named '%s', which is not a readable repository file.%s\n",
+           ANSI_YELLOW, path, ANSI_RESET);
+    state_append(state, cap, "Read failed",
+      "The file Choice named something that is not a readable repository file.");
+    free(path);
+    return;
+  }
+
+  serve_read_page(state, cap, path, " (picked by Jev)");
   free(path);
 }
 

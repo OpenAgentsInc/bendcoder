@@ -85,22 +85,38 @@ int main(void) {
                          &bad) == -1,
         "a group missing <<<OLD>>> is malformed");
 
-  // The picker's reply routinely carries the model's reasoning; a path must
-  // still be recovered from it, and refused when there is none.
-  char* p1 = extract_existing_path("tools_c.h");
-  check(p1 && strcmp(p1, "tools_c.h") == 0, "bare path extracted");
-  free(p1);
-  char* p2 = extract_existing_path(
-    "We need to view test_tools.c.We need to request the file content. So answer: test_tools.c");
-  check(p2 && strcmp(p2, "test_tools.c") == 0, "path extracted from leaked reasoning");
-  free(p2);
-  char* p3 = extract_existing_path("Let's read `run_tests.sh` next.");
-  check(p3 && strcmp(p3, "run_tests.sh") == 0, "path extracted from backticks");
-  free(p3);
-  check(extract_existing_path("I am not sure which file to read.") == NULL,
-        "reply naming no real file is refused");
-  check(extract_existing_path("/etc/passwd") == NULL, "absolute path not extracted");
-  check(extract_existing_path("docs") == NULL, "directory not extracted");
+  // The file Choice's options are the repository listing itself: files that
+  // exist are offered with a first-line description, anything else is filtered
+  // out, and "none" is always there so Jev can decline (#26).
+  FILE* cf = tmpfile();
+  check(cf != NULL, "criteria scratch file");
+  int offered = emit_file_criteria(cf, "tools_c.h\ndocs\nno_such_file.xyz\n../escape\n");
+  fflush(cf);
+  rewind(cf);
+  char crit[8192];
+  size_t crit_len = fread(crit, 1, sizeof(crit) - 1, cf);
+  crit[crit_len] = '\0';
+  fclose(cf);
+  check(strstr(crit, "\"tools_c.h\":\"") != NULL, "a tracked file is offered with a description");
+  check(offered == 1, "only the real file counts as an option");
+  check(strstr(crit, "no_such_file") == NULL, "a missing file is not offered");
+  check(strstr(crit, "\"docs\"") == NULL, "a directory is not offered");
+  check(strstr(crit, "escape") == NULL, "a path outside the repo is not offered");
+  check(strstr(crit, "\"none\":") != NULL, "none is always offered");
+
+  // A file read to the end drops out of the options so Jev cannot pick it again.
+  ReadCursor* done = read_cursor_for("tools_c.h");
+  check(done != NULL, "cursor for tools_c.h");
+  done->exhausted = 1;
+  FILE* cf2 = tmpfile();
+  emit_file_criteria(cf2, "tools_c.h\nREADME.md\n");
+  fflush(cf2);
+  rewind(cf2);
+  size_t crit2_len = fread(crit, 1, sizeof(crit) - 1, cf2);
+  crit[crit2_len] = '\0';
+  fclose(cf2);
+  check(strstr(crit, "tools_c.h") == NULL, "an exhausted file is not offered again");
+  check(strstr(crit, "README.md") != NULL, "an unfinished file is still offered");
 
   char* s1 = extract_search_pattern("tool_grep");
   check(s1 && strcmp(s1, "tool_grep") == 0, "bare search pattern extracted");

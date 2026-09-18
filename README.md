@@ -92,13 +92,15 @@ Classify -> Generate an edit -> Edit applies it -> verify -> pass? keep : roll b
 - **Stay in the repo.** Absolute paths and anything containing `..` are refused
   before they reach the tools.
 
-`read_code` lists the repository on its first pass, then asks the model which
-file to read next and serves it with line numbers. Each file carries a cursor,
-so naming it again serves the next page rather than the first one, and a reply
-that leaks the model's reasoning is mined for a path that actually exists rather
-than taken at face value. `search_code` greps the repository for a literal
-string, which is how the agent finds the file that matters instead of guessing
-a name.
+`read_code` lists the repository on its first pass, then hands that listing to
+`Classify` as a `Choice` — which file to read next is a closed set, so it is
+selected rather than generated, and no answer can name a file that is not
+there. A `none` option lets Jev say no file is worth reading. Each file
+carries a cursor, so choosing it again serves the next page rather than the
+first one, and a file read to the end drops out of the options. `search_code`
+greps the repository for a literal string, which is how the agent finds the
+file that matters instead of guessing a name; a pattern is open-ended text,
+so it stays with the generation model.
 
 `BENDER_MAX_STEPS` raises the step ceiling (default 6) for a longer run.
 
