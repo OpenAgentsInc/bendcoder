@@ -159,6 +159,12 @@ BENDER_GOAL="Find where the grep match cap is set." ./bender_loop_bin
 Bend has no `argv` — Base offers only `IO.get_env` — so the Bend loop takes its
 goal from `BENDER_GOAL` where `bender_agent.c` takes it from `argv[1]`.
 
+`selector.bend` is the one reviewable place the question set, the thresholds,
+and the answers-to-action table share (design rules 7 and 8): each threshold
+carries what it was tuned on, and the table is a `match` over the typed
+`LoopAnswers` with its rows pinned by laws. `bender_agent.c` mirrors it in
+`route_decision` and the `BENDER_*_FLOOR` block beside `jev_answer`.
+
 Bend 2.0.5 shapes that loop in ways worth knowing before editing it:
 
 - **No forward references.** A name must be defined before it is used, so top-level

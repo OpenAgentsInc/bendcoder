@@ -160,6 +160,40 @@ int main(void) {
   check(je.kind == JEV_MISSING && strstr(je.text, "rate limited") != NULL,
         "a failed request is JEV_MISSING carrying the error as its reason");
 
+  // The answers-to-action table: the same rows selector.bend pins with laws.
+  // route_decision(choice, conf, noul, repeats, risk, asked, read_phase, last).
+  check(route_decision("read_code", 0.9, 0.1, 0.1, 0.2, 0.1, 1, "", 0).act == ACT_READ_CODE,
+        "a confident read acts");
+  check(route_decision("read_code", 0.5, 0.1, 0.1, 0.2, 0.1, 1, "", 0).act == ACT_READ_CODE,
+        "a mid-confidence read acts");
+  check(route_decision("apply_edit", 0.5, 0.1, 0.1, 0.2, 0.9, 1, "", 0).act == ACT_READ_CODE,
+        "the same confidence under the edit floor re-reads");
+  check(route_decision("generate_answer", 0.3, 0.9, 0.1, 0.2, 0.9, 1, "", 0).act == ACT_READ_CODE,
+        "confidence under the floor re-reads rather than acting");
+  check(route_decision("task_complete", 0.3, 0.9, 0.1, 0.2, 0.9, 1, "", 0).act == ACT_TASK_COMPLETE,
+        "a decision to stop is not rerouted by the floor");
+  check(route_decision("search_code", 0.9, 0.1, 0.9, 0.2, 0.1, 1, "search_code", 0).act == ACT_READ_CODE,
+        "repeats high does not take that action again");
+  check(route_decision("apply_edit", 0.9, 0.1, 0.1, 1.8, 0.1, 1, "", 0).act == ACT_READ_CODE,
+        "top-level risk the goal did not ask for is not run");
+  check(route_decision("apply_edit", 0.9, 0.1, 0.1, 1.8, 0.9, 1, "", 0).act == ACT_APPLY_EDIT,
+        "top-level risk the goal asked for runs");
+  check(route_decision("apply_edit", 0.9, 0.1, 0.1, 0.2, 0.9, 0, "", 0).act == ACT_READ_CODE,
+        "an edit before the first read reads first");
+  check(route_decision("generate_answer", 0.9, 0.1, 0.1, 0.2, 0.9, 0, "", 0).act == ACT_READ_CODE,
+        "an answer on too little information with nothing read reads first");
+  check(route_decision("none", 0.9, 0.1, 0.9, 1.8, 0.1, 1, "none", 0).act == ACT_NO_FIT,
+        "none passes through to the dispatch halt");
+  // The search-miss row: enough consecutive misses turns a search into a read,
+  // which is the deterministic sibling of the repeats row beside it (#9).
+  check(route_decision("search_code", 0.9, 0.1, 0.1, 0.2, 0.1, 1, "", 0).act == ACT_SEARCH_CODE,
+        "a search with no misses behind it runs");
+  check(route_decision("search_code", 0.9, 0.1, 0.1, 0.2, 0.1, 1, "", 2).act == ACT_READ_CODE,
+        "a search after two misses in a row becomes a read");
+
+  check(route_decision("bogus", 0.9, 0.1, 0.1, 0.2, 0.1, 1, "", 0).act == ACT_UNRECOGNIZED,
+        "a decision naming no action passes through to the dispatch halt");
+
   check(path_is_in_repo("sys_c.c"), "relative path allowed");
   check(!path_is_in_repo("/etc/passwd"), "absolute path refused");
   check(!path_is_in_repo("../secrets"), "parent traversal refused");

@@ -233,6 +233,8 @@ static char* call_typesafe_classify(const char* state_str) {
       "\"has_enough_info\":{\"type\":\"noul\",\"instructions\":\"Does the current state have enough concrete information to directly answer the user prompt?\"},"
       "\"needs_code_change\":{\"type\":\"noul\",\"instructions\":\"Does satisfying this goal require editing files in this repository, rather than only answering in prose?\"},"
       "\"repeats\":{\"type\":\"noul\",\"instructions\":\"Would the next action repeat something the state already records having tried without success?\"},"
+      "\"risk\":{\"type\":\"score\",\"instructions\":\"How much can the chosen next action destroy or expose?\","
+      "\"criteria\":[\"0: Read-only inspection; nothing on disk changes\",\"1: Runs a command or generates text; reversible\",\"2: Writes to disk or can break the build\"]},"
       "\"confidence_score\":{\"type\":\"score\",\"instructions\":\"How confident are we that we can answer or finish now?\","
       "\"criteria\":[\"0: Need more information from files or commands\",\"1: Partially understood\",\"2: Fully ready to answer or complete\"]}"
     "}}",
@@ -474,6 +476,114 @@ static JevAnswer jev_answer(const char* json, const char* qid) {
   }
   snprintf(a.text, sizeof(a.text), "unrecognised answer for \"%s\" in the Classify response", qid);
   return a;
+}
+
+// -----------------------------------------------------------------------------
+// The selector: thresholds and the answers-to-action table, in one reviewable
+// place (design rules 7 and 8)
+// -----------------------------------------------------------------------------
+// selector.bend holds the canonical form — the same table as a match over the
+// typed Answer, its rows pinned by laws — and this block mirrors it for the C
+// runtime. Keep the two in step.
+//
+//   Answers                                            Route
+//   -------------------------------------------------  -------------------------
+//   `action` missing, mistyped, or names no action     Halt with a reason
+//   `action` is `none`                                 Halt with a reason
+//   `action` confidence under the floor                Do not act; re-read or ask
+//   `repeats` high                                     Do not take that action again
+//   `risk` at the top level and the goal did not ask   Confirm before running
+//   otherwise                                          Act on the choice
+//
+// Rule 7 asks each threshold to say what it was tuned on. The confidence
+// floor is measured: across the delegation runs, steps that advanced the task
+// sat at 0.55 and above while runs that flailed for ten steps and landed
+// nothing sat between 0.21 and 0.43; 0.45 separates them (#33). The rest are
+// marked unmeasured rather than dressed up as data.
+#define BENDER_CONFIDENCE_FLOOR 0.45
+#define BENDER_EDIT_CONFIDENCE_FLOOR 0.65  // unmeasured; higher by consequence (writes to disk)
+#define BENDER_REPEATS_FLOOR 0.60          // carried over; unmeasured
+#define BENDER_INFO_FLOOR 0.60             // has_enough_info noul; unmeasured
+#define BENDER_RISK_TOP 1.5                // top band of the 0-2 weighted-mean risk score; unmeasured
+#define BENDER_ASKED_FLOOR 0.50            // needs_code_change noul; unmeasured
+#define BENDER_MAX_LOW_CONFIDENCE 3        // consecutive under-floor steps before the loop stops
+
+// The consequence-weighted floor for one action: apply_edit writes to disk
+// and can break the build, so it clears a higher bar than read-only actions.
+static double confidence_floor_for(Action act) {
+  return act == ACT_APPLY_EDIT ? BENDER_EDIT_CONFIDENCE_FLOOR : BENDER_CONFIDENCE_FLOOR;
+}
+
+typedef struct {
+  Action act;        // the action the step is routed to
+  const char* note;  // why the route differs from the choice (NULL = run it)
+} Route;
+
+// The answers-to-action table: the step's answers in, the action to take out.
+// The two halt rows live in the caller — a missing or mistyped `action` is
+// caught by the kind switch, and `none`/unparseable pass through here to the
+// dispatch's ACT_NO_FIT/ACT_UNRECOGNIZED halts.
+// Consecutive search misses the loop tolerates before turning to reading.
+// Kept with the other thresholds the routing table reads rather than beside
+// the counter it compares against.
+#define BENDER_SEARCH_MISS_LIMIT 2
+
+static Route route_decision(const char* choice, double conf, double noul,
+                            double repeats, double risk, double asked,
+                            int read_phase, const char* last_decision,
+                            int search_misses) {
+  Route r;
+  r.act = action_from_string(choice);
+  r.note = NULL;
+
+  if (r.act == ACT_NO_FIT || r.act == ACT_UNRECOGNIZED) return r;
+
+  // `action` confidence under the floor: do not act; re-read or ask.
+  if (r.act != ACT_TASK_COMPLETE && conf < confidence_floor_for(r.act)) {
+    r.act = ACT_READ_CODE;
+    r.note = "action confidence is under the floor; re-read or ask instead of acting";
+    return r;
+  }
+
+  // `repeats` high: do not take that action again.
+  if (repeats > BENDER_REPEATS_FLOOR && r.act != ACT_TASK_COMPLETE &&
+      last_decision[0] != '\0' && strcmp(choice, last_decision) == 0) {
+    r.act = ACT_READ_CODE;
+    r.note = "the chosen action repeats a failed attempt; not taking it again";
+    return r;
+  }
+
+  // `risk` at the top level and the goal did not ask for it: confirm before
+  // running. The loop has no one to ask mid-run, so it does not run it.
+  if (r.act == ACT_APPLY_EDIT && risk >= BENDER_RISK_TOP && asked < BENDER_ASKED_FLOOR) {
+    r.act = ACT_READ_CODE;
+    r.note = "risk is at the top level and the goal did not ask for it; needs a person's confirmation";
+    return r;
+  }
+
+  // A search that keeps missing is not converging. This is the deterministic
+  // sibling of the repeats row above: Jev is still asked, but the loop does
+  // not wait for it to notice, and a read can only add information.
+  if (r.act == ACT_SEARCH_CODE && search_misses >= BENDER_SEARCH_MISS_LIMIT) {
+    r.act = ACT_READ_CODE;
+    r.note = "several searches in a row found nothing; reading instead";
+    return r;
+  }
+
+  // Loop guards, kept as rows so they review beside the rest: an edit is only
+  // drafted against code already read, and an answer on too little
+  // information with nothing read yet is a guess.
+  if (r.act == ACT_APPLY_EDIT && read_phase == 0) {
+    r.act = ACT_READ_CODE;
+    r.note = "an edit is only drafted against code already read; reading first";
+    return r;
+  }
+  if (r.act == ACT_GENERATE_ANSWER && read_phase == 0 && noul < BENDER_INFO_FLOOR) {
+    r.act = ACT_READ_CODE;
+    r.note = "too little information to answer and nothing read yet; reading first";
+    return r;
+  }
+  return r;
 }
 
 // -----------------------------------------------------------------------------
@@ -865,7 +975,6 @@ static int search_history_count = 0;
 // deterministic version of the repeats Noul: Jev is asked, but the loop does
 // not wait for it to notice the same action keeps failing.
 static int search_miss_run = 0;
-#define BENDER_SEARCH_MISS_LIMIT 2
 
 static SearchRecord* search_record_find(const char* pattern) {
   for (int i = 0; i < search_history_count; i++) {
@@ -1258,13 +1367,8 @@ int main(int argc, char** argv) {
   int read_phase = 0;
   // Read, edit, verify and retry does not fit in the six steps an answer takes.
   // BENDER_MAX_STEPS raises the ceiling for a longer self-improvement run.
-  // Thresholds, together and named, rather than scattered through the dispatch.
-  // The floor comes from measurement, not taste: across the delegation runs,
-  // productive steps sat at 0.55 and above while runs that flailed for ten
-  // steps and landed nothing sat between 0.21 and 0.43. See #33.
-  const double CONFIDENCE_FLOOR = 0.45;
-  const double REPEATS_FLOOR = 0.60;
-  const int MAX_LOW_CONFIDENCE = 3;
+  // The thresholds and the answers-to-action table live in the selector block
+  // above (canonically in selector.bend); each step calls route_decision.
 
   int halted_early = 0;
   int low_confidence_run = 0;
@@ -1286,6 +1390,7 @@ int main(int argc, char** argv) {
     JevAnswer progress = jev_answer(c_resp, "confidence_score");
     JevAnswer needs    = jev_answer(c_resp, "needs_code_change");
     JevAnswer rep      = jev_answer(c_resp, "repeats");
+    JevAnswer risk_a   = jev_answer(c_resp, "risk");
 
     char* decision = NULL;
     double conf = 0.0;
@@ -1314,42 +1419,26 @@ int main(int argc, char** argv) {
 
     // A question answered with the wrong type reads as zero, as an absent one
     // did before — the answer's kind is what carries the failure now.
-    double noul = 0.0, score = 0.0, needs_change = 0.0, repeats = 0.0;
+    double noul = 0.0, score = 0.0, needs_change = 0.0, repeats = 0.0, risk = 0.0;
     if (info.kind == JEV_NOULED) noul = info.probability;
     if (progress.kind == JEV_SCORED) score = progress.score;
     if (needs.kind == JEV_NOULED) needs_change = needs.probability;
     if (rep.kind == JEV_NOULED) repeats = rep.probability;
+    if (risk_a.kind == JEV_SCORED) risk = risk_a.score;
 
-    // Guardrail: Only override generate_answer to read_code if we haven't read any code yet (read_phase == 0).
-    // Once code has been read, trust generate_answer and do not trap the agent in an infinite read loop.
-    if (strcmp(decision, ACTION_NAMES[ACT_GENERATE_ANSWER]) == 0 && read_phase == 0 && noul < 0.60) {
+    // 2. Route: the answers-to-action table maps the step's answers to the
+    // action taken. A reroute says why, and the next round's state sees it.
+    Route r = route_decision(decision, conf, noul, repeats, risk, needs_change,
+                             read_phase, last_decision, search_miss_run);
+    if (r.act != ACT_UNRECOGNIZED && strcmp(decision, ACTION_NAMES[r.act]) != 0) {
       free(decision);
-      decision = strdup(ACTION_NAMES[ACT_READ_CODE]);
+      decision = strdup(ACTION_NAMES[r.act]);
+      printf("🔀 %sSelector: %s%s\n", ANSI_YELLOW, r.note ? r.note : "", ANSI_RESET);
+      if (r.note) state_append(state, sizeof(state), "Selector rerouted", r.note);
     }
 
-    // An edit is only drafted against code that has actually been read, so an
-    // apply_edit chosen before the first read becomes that read instead.
-    if (strcmp(decision, ACTION_NAMES[ACT_APPLY_EDIT]) == 0 && read_phase == 0) {
-      free(decision);
-      decision = strdup(ACTION_NAMES[ACT_READ_CODE]);
-    }
-
-    // A search that keeps missing is not converging, and nothing else in the
-    // loop notices on its own. The same kind of nudge that turns an early
-    // apply_edit into a read sends a repeatedly-missing search_code at
-    // read_code, which can only add information.
-    if (strcmp(decision, ACTION_NAMES[ACT_SEARCH_CODE]) == 0 &&
-        search_miss_run >= BENDER_SEARCH_MISS_LIMIT) {
-      printf("🔁 %s%d searches in a row found nothing; reading instead.%s\n",
-             ANSI_YELLOW, search_miss_run, ANSI_RESET);
-      state_append(state, sizeof(state), "Searches kept missing",
-        "search_code has missed several times running, so the loop is reading "
-        "code instead. The search output above names files worth a look.");
-      free(decision);
-      decision = strdup(ACTION_NAMES[ACT_READ_CODE]);
-    }
-
-    // Fallback: If we are on the penultimate or final step and still haven't generated an answer, force generate_answer.
+    // Fuel policy rather than an answer route, so it stays beside the loop:
+    // on the penultimate or final step with no answer yet, force one.
     if (step >= max_steps - 1 && final_answer == NULL && decision[0] != '\0' &&
         strcmp(decision, ACTION_NAMES[ACT_NO_FIT]) != 0 &&
         strcmp(decision, ACTION_NAMES[ACT_TASK_COMPLETE]) != 0) {
@@ -1358,34 +1447,21 @@ int main(int argc, char** argv) {
     }
 
     printf("🧠 %sAction Selected:%s %s%-16s%s %s(conf: %.2f, info: %.2f, score: %.2f, "
-           "needs_change: %.2f, repeats: %.2f)%s\n",
+           "needs_change: %.2f, repeats: %.2f, risk: %.2f)%s\n",
       ANSI_BOLD, ANSI_RESET,
       ANSI_YELLOW, decision, ANSI_RESET,
-      ANSI_DIM, conf, noul, score, needs_change, repeats, ANSI_RESET);
-
-    // A repeat of something already tried without success is worth one nudge,
-    // not another attempt. Seven identical search_code selections in ten steps
-    // is what this exists to stop.
-    if (repeats > REPEATS_FLOOR && strcmp(decision, last_decision) == 0 &&
-        strcmp(decision, ACTION_NAMES[ACT_TASK_COMPLETE]) != 0) {
-      printf("🔁 %sJev reports this repeats a failed attempt (%.2f); reading instead.%s\n",
-             ANSI_YELLOW, repeats, ANSI_RESET);
-      state_append(state, sizeof(state), "Repetition avoided",
-        "The last action was about to be repeated after failing. Try a different approach.");
-      free(decision);
-      decision = strdup(ACTION_NAMES[ACT_READ_CODE]);
-    }
+      ANSI_DIM, conf, noul, score, needs_change, repeats, risk, ANSI_RESET);
 
     // Jev saying, step after step, that it does not know. Acting on it anyway
     // is how a run burns its whole budget and lands nothing.
-    if (conf < CONFIDENCE_FLOOR) {
+    if (conf < BENDER_CONFIDENCE_FLOOR) {
       low_confidence_run++;
     } else {
       low_confidence_run = 0;
     }
-    if (low_confidence_run >= MAX_LOW_CONFIDENCE) {
+    if (low_confidence_run >= BENDER_MAX_LOW_CONFIDENCE) {
       printf("🛑 %s%d steps below the confidence floor (%.2f); stopping rather than flailing.%s\n",
-             ANSI_YELLOW, low_confidence_run, CONFIDENCE_FLOOR, ANSI_RESET);
+             ANSI_YELLOW, low_confidence_run, BENDER_CONFIDENCE_FLOOR, ANSI_RESET);
       halted_early = 1;
       free(c_resp);
       free(decision);
@@ -1398,7 +1474,7 @@ int main(int argc, char** argv) {
     // nudged into — breaks the miss run.
     if (action_from_string(decision) != ACT_SEARCH_CODE) search_miss_run = 0;
 
-    // 2. Dispatch. The decision string is decoded once and the switch is
+    // 3. Dispatch. The decision string is decoded once and the switch is
     // exhaustive over Action: a string no action owns is a halt, not a
     // fallthrough to generate_answer.
     int halt = 0;

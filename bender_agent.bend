@@ -1,9 +1,11 @@
 import Base
 import ./agent_primitives.bend as P
 import ./action.bend as A
-# in_repo is the proved path guard from LAWS.bend; the PROOF import is what
-# fills its laws inside this program, so both are needed for the one check.
+# guard.bend holds in_repo, the path check apply_edit makes; the laws about it
+# are proved in PROOF.bend, which the suite runs separately -- a module with
+# unfilled laws cannot be imported by a program.
 import ./guard.bend as G
+import ./selector.bend as S
 
 # ==============================================================================
 # Bender: Autonomous Coding Agent Loop & Terminal UI
@@ -64,36 +66,8 @@ type Progress is Data:
   # escape hatch forces, since its probabilities always sum to one.
   Stalled{reason: String}
 
-# Questions asked of TypeSafe System One at each step of the loop
-def loop_triage_questions() -> List<&2, P.Question>:
-  [
-    P.ChoiceQ{
-      "action",
-      "Based on the current state, what is the single next best action to advance or verify the task?",
-      [
-        P.Opt{A.show_action(A.ReadCode{}), "Read source code or repository files to understand context or inspect implementations"},
-        P.Opt{A.show_action(A.SearchCode{}), "Search the repository for a literal string to find which files are relevant"},
-        P.Opt{A.show_action(A.RunBuild{}), "Run build, compile, or test command to check if code works or reproduces an error"},
-        P.Opt{A.show_action(A.ApplyEdit{}), "Change the code on disk: the fix is understood and a concrete edit to a known file can be written now"},
-        P.Opt{A.show_action(A.GenerateAnswer{}), "Synthesize code, write a patch, or generate a fix using the LLM"},
-        P.Opt{A.show_action(A.TaskComplete{}), "The task is successfully resolved, verified, and complete"},
-        P.Opt{"none", "No listed action fits: the state does not yet support a next step"}
-      ]
-    },
-    P.NoulQ{
-      "is_blocked",
-      "Is the task blocked by an error or failing verification?"
-    },
-    P.ScoreQ{
-      "progress_score",
-      "How close is the current state to a fully verified resolution?",
-      [
-        "0: Just starting / investigating",
-        "1: Root cause understood, attempting fix",
-        "2: Fully fixed, verified, and ready to finish"
-      ]
-    }
-  ]
+# The question set lives in selector.bend beside the thresholds and the route
+# table that consume them (design rule 8); agent_step asks S.questions().
 
 # Tool output is both shown and folded into the next round's state, so it
 # arrives reusable (`+`); affine is the default and would reject the reuse.
@@ -423,26 +397,46 @@ def draft_apply_edit(+state: String) -> IO(Progress):
 # exhaustive over the Action type. `misses` is the running count of failed
 # searches; `search_stuck` is its comparison against the limit, computed by
 # the caller because a match cannot inspect a computed value.
-def dispatch_action(is_none: Bool, a: Maybe<&2, A.Action>, state: String, misses: U32, search_stuck: Bool) -> IO(Progress):
-  match is_none a search_stuck:
-    case True{} _ _:
-      IO.pure(Progress, Stalled{"Classify reported that no listed action fits the current state."})
-    case _ None{} _:
-      IO.pure(Progress, Stalled{"Classify returned a decision that names no action."})
-    case _ Some{A.SearchCode{}} True{}:
-      search_stuck_read()
-    case _ Some{A.ReadCode{}} _:
+# The action arrives already routed: `none` and unparseable decisions are Stop
+# rows in the selector's table upstream, so this match is over Action itself.
+def dispatch_action(a: A.Action, state: String, misses: U32) -> IO(Progress):
+  match a:
+    case A.ReadCode{}:
       act_read_code()
-    case _ Some{A.SearchCode{}} _:
+    case A.SearchCode{}:
       act_search_code(state, misses)
-    case _ Some{A.RunBuild{}} _:
+    case A.RunBuild{}:
       act_run_build()
-    case _ Some{A.ApplyEdit{}} _:
+    case A.ApplyEdit{}:
       draft_apply_edit(state)
-    case _ Some{A.GenerateAnswer{}} _:
+    case A.GenerateAnswer{}:
       act_generate_answer(state)
-    case _ Some{A.TaskComplete{}} _:
+    case A.TaskComplete{}:
       IO.pure(Progress, Finished{})
+
+# A route that is not Act lands here: the chosen action is not run and the
+# loop re-reads instead, which is the safe fallback every non-acting row
+# shares. Confirm carries the same landing — the Bend loop has no one to ask
+# mid-run, so an unconfirmed risky action is not run either.
+def reroute(+reason: String) -> IO(Progress):
+  do IO<Progress>:
+    u1 : Unit <- IO.print(color_yellow("   [selector] " ++ reason ++ "; re-reading instead."))
+    act_read_code()
+
+# The selector's table decides the step: Act dispatches, the re-read rows take
+# the safe fallback, and Stop stalls the loop with the reason it carried.
+def run_route(r: S.Route, state: String, misses: U32) -> IO(Progress):
+  match r:
+    case S.Act{+action}:
+      dispatch_action(action, state, misses)
+    case S.Reread{+reason}:
+      reroute(reason)
+    case S.Skip{+reason}:
+      reroute(reason)
+    case S.Confirm{+action, +reason}:
+      reroute(reason ++ " — a person must confirm " ++ A.show_action(action) ++ " before it runs")
+    case S.Stop{+reason}:
+      IO.pure(Progress, Stalled{reason})
 
 # The short note an answer makes on the step line, for the questions that are
 # not the action itself. Missing reads as what it is — the request gave no
@@ -458,31 +452,21 @@ def answer_note(a: P.Answer) -> String:
     case P.Missing{+reason}:
       "missing: " ++ reason
 
-# A match scrutinizes only a parameter, so the typed answers arrive here and
-# the action's own case decides the step. `choice` is printed once and
-# compared twice, hence `+`. A missing or mistyped answer stalls the loop
-# rather than falling through to a generation it never chose — #32's case.
-def run_answers(
-  action: P.Answer, blocked: P.Answer, progress: P.Answer, state: String, +misses: U32
-) -> IO(Progress):
-  match action:
-    case P.Chosen{+choice, +confidence}:
+# The step's answers print as one line and route through the selector's table:
+# every decision the old dispatch made inline — `none`, unparseable, missing,
+# the confidence floor — is a row there now. `answers` is reusable so it can
+# be both opened for the note and handed to route whole.
+def run_answers(+answers: S.LoopAnswers, state: String, misses: U32) -> IO(Progress):
+  match answers:
+    case S.Ans{+action, +blocked, repeats, asked, risk, +progress}:
       do IO<Progress>:
         u1 : Unit <- IO.print(
-          color_yellow("[Classify Decision] ") ++ color_bold(choice) ++
-          color_yellow(" (confidence " ++ F32.show(confidence) ++
-          ", blocked " ++ answer_note(blocked) ++
+          color_yellow("[Classify Decision] ") ++ color_bold(answer_note(action)) ++
+          color_yellow(" (blocked " ++ answer_note(blocked) ++
           ", progress " ++ answer_note(progress) ++ ")"))
         u2 : Unit <- IO.print("")
-        dispatch_action(
-          String.eq(choice, "none"), A.parse_action(choice), state,
-          misses, U32.is_ge(misses, 2))
-    case P.Missing{+reason}:
-      IO.pure(Progress, Stalled{"Classify returned no answer: " ++ reason})
-    case P.Scored{+score, +confidence}:
-      IO.pure(Progress, Stalled{"Classify answered 'action' with a score (" ++ F32.show(score) ++ "), not a choice."})
-    case P.Nouled{+probability}:
-      IO.pure(Progress, Stalled{"Classify answered 'action' with a noul (" ++ F32.show(probability) ++ "), not a choice."})
+        run_route(S.route(answers), state, misses)
+
 # One round: fold the last tool output into the state, classify it, run the
 # chosen action, and recurse on the remaining fuel.
 # `fuel` leads the parameter list on two counts: a match reads its scrutinees in
@@ -505,11 +489,14 @@ def agent_step(fuel: Nat, phase: Progress, +step_num: U32, +state: String) -> IO
         u1 : Unit <- IO.print(color_cyan(rule()))
         u2 : Unit <- IO.print(color_bold("[STEP " ++ U32.show(step_num) ++ "] Evaluating State with Classify (TypeSafe System One)..."))
         u3 : Unit <- IO.print(color_cyan(rule()))
-        +c_raw : String <- P.Classify(state ++ output, loop_triage_questions())
+        +c_raw : String <- P.Classify(state ++ output, S.questions())
         action : P.Answer <- P.ParseAnswer(c_raw, "action")
         blocked : P.Answer <- P.ParseAnswer(c_raw, "is_blocked")
+        repeats : P.Answer <- P.ParseAnswer(c_raw, "repeats")
+        asked : P.Answer <- P.ParseAnswer(c_raw, "needs_code_change")
+        risk : P.Answer <- P.ParseAnswer(c_raw, "risk")
         progress : P.Answer <- P.ParseAnswer(c_raw, "progress_score")
-        next : Progress <- run_answers(action, blocked, progress, state ++ output, misses)
+        next : Progress <- run_answers(S.Ans{action, blocked, repeats, asked, risk, progress}, state ++ output, misses)
         agent_step(p, next, (step_num + 1 : U32), state ++ output)
 
 # The goal is both announced and seeded into the state, so it arrives reusable.
