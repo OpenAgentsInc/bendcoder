@@ -26,6 +26,37 @@ static void render_banner(void) {
   printf("%s================================================================================%s\n", ANSI_CYAN, ANSI_RESET);
 }
 
+// The agent's action space as a type rather than a string compared with
+// strcmp in a chain: the dispatch switch is exhaustive over it, and a
+// decision that parses to nothing is a halt, not a quiet generate_answer.
+// ACTION_NAMES is also the source of the criteria names sent to Classify, so
+// the name offered and the name parsed back cannot drift apart. The Bend
+// loop keeps the same six actions in `type Action` (action.bend) and proves
+// its parse/show round-trip there.
+typedef enum {
+  ACT_READ_CODE, ACT_SEARCH_CODE, ACT_RUN_BUILD,
+  ACT_APPLY_EDIT, ACT_GENERATE_ANSWER, ACT_TASK_COMPLETE,
+  ACT_NO_FIT,        // "none": a real decision — Classify says no action fits
+  ACT_UNRECOGNIZED   // any other string: a parse failure, not a choice
+} Action;
+
+static const char* const ACTION_NAMES[] = {
+  [ACT_READ_CODE] = "read_code",
+  [ACT_SEARCH_CODE] = "search_code",
+  [ACT_RUN_BUILD] = "run_build",
+  [ACT_APPLY_EDIT] = "apply_edit",
+  [ACT_GENERATE_ANSWER] = "generate_answer",
+  [ACT_TASK_COMPLETE] = "task_complete",
+  [ACT_NO_FIT] = "none",
+};
+
+static Action action_from_string(const char* s) {
+  for (int i = 0; i <= ACT_NO_FIT; i++) {
+    if (ACTION_NAMES[i] && strcmp(s, ACTION_NAMES[i]) == 0) return (Action)i;
+  }
+  return ACT_UNRECOGNIZED;
+}
+
 // Low-level helper: execute shell command and capture combined stdout/stderr.
 // *status, when given, receives the command's exit code so a caller can tell a
 // clean build from a failing one without reading the output.
@@ -101,22 +132,26 @@ static char* call_typesafe_classify(const char* state_str) {
       else if (*p == '\t') fputs("\\t", pf);
       else fputc(*p, pf);
     }
-    fputs("\",\"questions\":{"
+    fprintf(pf, "\",\"questions\":{"
       "\"action\":{\"type\":\"choice\",\"instructions\":\"Given the user question or goal and current state, what is the single next best action to take?\","
       "\"criteria\":{"
-        "\"read_code\":\"Inspect files, repository contents, or directory listings to gather needed facts\","
-        "\"search_code\":\"Search the repository for a literal string to find which files are relevant\","
-        "\"run_build\":\"Run a shell command, test, or build to inspect output\","
-        "\"apply_edit\":\"Change the code on disk: the fix is understood and a concrete edit to a known file can be written now\","
-        "\"generate_answer\":\"Synthesize the final answer, explanation, or code using the LLM\","
-        "\"task_complete\":\"The user request has already been completely answered and verified\","
-        "\"none\":\"No listed action fits: the state does not yet support a next step\"}},"
+        "\"%s\":\"Inspect files, repository contents, or directory listings to gather needed facts\","
+        "\"%s\":\"Search the repository for a literal string to find which files are relevant\","
+        "\"%s\":\"Run a shell command, test, or build to inspect output\","
+        "\"%s\":\"Change the code on disk: the fix is understood and a concrete edit to a known file can be written now\","
+        "\"%s\":\"Synthesize the final answer, explanation, or code using the LLM\","
+        "\"%s\":\"The user request has already been completely answered and verified\","
+        "\"%s\":\"No listed action fits: the state does not yet support a next step\"}},"
       "\"has_enough_info\":{\"type\":\"noul\",\"instructions\":\"Does the current state have enough concrete information to directly answer the user prompt?\"},"
       "\"needs_code_change\":{\"type\":\"noul\",\"instructions\":\"Does satisfying this goal require editing files in this repository, rather than only answering in prose?\"},"
       "\"repeats\":{\"type\":\"noul\",\"instructions\":\"Would the next action repeat something the state already records having tried without success?\"},"
       "\"confidence_score\":{\"type\":\"score\",\"instructions\":\"How confident are we that we can answer or finish now?\","
       "\"criteria\":[\"0: Need more information from files or commands\",\"1: Partially understood\",\"2: Fully ready to answer or complete\"]}"
-    "}}", pf);
+    "}}",
+      ACTION_NAMES[ACT_READ_CODE], ACTION_NAMES[ACT_SEARCH_CODE],
+      ACTION_NAMES[ACT_RUN_BUILD], ACTION_NAMES[ACT_APPLY_EDIT],
+      ACTION_NAMES[ACT_GENERATE_ANSWER], ACTION_NAMES[ACT_TASK_COMPLETE],
+      ACTION_NAMES[ACT_NO_FIT]);
     fflush(pf);
     fclose(pf);
   }
@@ -750,23 +785,24 @@ int main(int argc, char** argv) {
 
     // Guardrail: Only override generate_answer to read_code if we haven't read any code yet (read_phase == 0).
     // Once code has been read, trust generate_answer and do not trap the agent in an infinite read loop.
-    if (strcmp(decision, "generate_answer") == 0 && read_phase == 0 && noul < 0.60) {
+    if (strcmp(decision, ACTION_NAMES[ACT_GENERATE_ANSWER]) == 0 && read_phase == 0 && noul < 0.60) {
       free(decision);
-      decision = strdup("read_code");
+      decision = strdup(ACTION_NAMES[ACT_READ_CODE]);
     }
 
     // An edit is only drafted against code that has actually been read, so an
     // apply_edit chosen before the first read becomes that read instead.
-    if (strcmp(decision, "apply_edit") == 0 && read_phase == 0) {
+    if (strcmp(decision, ACTION_NAMES[ACT_APPLY_EDIT]) == 0 && read_phase == 0) {
       free(decision);
-      decision = strdup("read_code");
+      decision = strdup(ACTION_NAMES[ACT_READ_CODE]);
     }
 
     // Fallback: If we are on the penultimate or final step and still haven't generated an answer, force generate_answer.
     if (step >= max_steps - 1 && final_answer == NULL && decision[0] != '\0' &&
-        strcmp(decision, "none") != 0 && strcmp(decision, "task_complete") != 0) {
+        strcmp(decision, ACTION_NAMES[ACT_NO_FIT]) != 0 &&
+        strcmp(decision, ACTION_NAMES[ACT_TASK_COMPLETE]) != 0) {
       free(decision);
-      decision = strdup("generate_answer");
+      decision = strdup(ACTION_NAMES[ACT_GENERATE_ANSWER]);
     }
 
     printf("🧠 %sAction Selected:%s %s%-16s%s %s(conf: %.2f, info: %.2f, score: %.2f, "
@@ -779,13 +815,13 @@ int main(int argc, char** argv) {
     // not another attempt. Seven identical search_code selections in ten steps
     // is what this exists to stop.
     if (repeats > REPEATS_FLOOR && strcmp(decision, last_decision) == 0 &&
-        strcmp(decision, "task_complete") != 0) {
+        strcmp(decision, ACTION_NAMES[ACT_TASK_COMPLETE]) != 0) {
       printf("🔁 %sJev reports this repeats a failed attempt (%.2f); reading instead.%s\n",
              ANSI_YELLOW, repeats, ANSI_RESET);
       state_append(state, sizeof(state), "Repetition avoided",
         "The last action was about to be repeated after failing. Try a different approach.");
       free(decision);
-      decision = strdup("read_code");
+      decision = strdup(ACTION_NAMES[ACT_READ_CODE]);
     }
 
     // Jev saying, step after step, that it does not know. Acting on it anyway
@@ -805,56 +841,66 @@ int main(int argc, char** argv) {
 
     snprintf(last_decision, sizeof(last_decision), "%s", decision);
 
-    // 2. Dispatch
-    if (decision[0] == '\0') {
-      // Classify returned nothing parseable — a failed request, not a choice.
-      // Falling through to generate_answer would present the failure to the
-      // loop as a confident decision to generate. See #32.
-      printf("⚠️  %sClassify returned no answer; halting rather than guessing.%s\n",
-             ANSI_YELLOW, ANSI_RESET);
-      free(c_resp);
-      free(decision);
-      break;
-    } else if (strcmp(decision, "none") == 0) {
-      // Jev saying nothing fits, which a Choice can only express when it is
-      // given the option — its probabilities always sum to one.
-      printf("🛑 %sNo listed action fits the current state; stopping.%s\n",
-             ANSI_YELLOW, ANSI_RESET);
-      state_append(state, sizeof(state), "Stalled",
-        "Classify reported that no listed action fits the current state.");
-      free(c_resp);
-      free(decision);
-      break;
-    } else if (strcmp(decision, "task_complete") == 0) {
-      free(c_resp);
-      free(decision);
-      break;
-    } else if (strcmp(decision, "read_code") == 0) {
-      do_read_code(state, sizeof(state), goal_prompt, read_phase);
-      read_phase++;
-    } else if (strcmp(decision, "search_code") == 0) {
-      do_search_code(state, sizeof(state), goal_prompt);
-    } else if (strcmp(decision, "apply_edit") == 0) {
-      do_apply_edit(state, sizeof(state), goal_prompt);
-    } else if (strcmp(decision, "run_build") == 0) {
-      printf("⚡ %sRunning verification: %s%s\n", ANSI_MAGENTA, verify_command(), ANSI_RESET);
-      int status = -1;
-      char* out = exec_cmd_status(verify_command(), &status);
-      char label[64];
-      snprintf(label, sizeof(label), "Verification output (exit %d)", status);
-      state_append(state, sizeof(state), label, out);
-      free(out);
-    } else { // generate_answer
-      printf("✨ %sSynthesizing answer via OpenRouter...%s\n", ANSI_MAGENTA, ANSI_RESET);
-      char* g_resp = call_openrouter_generate(state);
-      if (final_answer) free(final_answer);
-      final_answer = extract_content(g_resp);
-      state_append(state, sizeof(state), "Answer generated", final_answer);
-      free(g_resp);
+    // 2. Dispatch. The decision string is decoded once and the switch is
+    // exhaustive over Action: a string no action owns is a halt, not a
+    // fallthrough to generate_answer.
+    int halt = 0;
+    switch (action_from_string(decision)) {
+      case ACT_UNRECOGNIZED:
+        // Classify returned nothing parseable — a failed request or a
+        // decision naming no action, not a choice. Falling through to
+        // generate_answer would present the failure to the loop as a
+        // confident decision to generate. See #32.
+        printf("⚠️  %sClassify returned no recognizable action; halting rather than guessing.%s\n",
+               ANSI_YELLOW, ANSI_RESET);
+        halt = 1;
+        break;
+      case ACT_NO_FIT:
+        // Jev saying nothing fits, which a Choice can only express when it is
+        // given the option — its probabilities always sum to one.
+        printf("🛑 %sNo listed action fits the current state; stopping.%s\n",
+               ANSI_YELLOW, ANSI_RESET);
+        state_append(state, sizeof(state), "Stalled",
+          "Classify reported that no listed action fits the current state.");
+        halt = 1;
+        break;
+      case ACT_TASK_COMPLETE:
+        halt = 1;
+        break;
+      case ACT_READ_CODE:
+        do_read_code(state, sizeof(state), goal_prompt, read_phase);
+        read_phase++;
+        break;
+      case ACT_SEARCH_CODE:
+        do_search_code(state, sizeof(state), goal_prompt);
+        break;
+      case ACT_APPLY_EDIT:
+        do_apply_edit(state, sizeof(state), goal_prompt);
+        break;
+      case ACT_RUN_BUILD: {
+        printf("⚡ %sRunning verification: %s%s\n", ANSI_MAGENTA, verify_command(), ANSI_RESET);
+        int status = -1;
+        char* out = exec_cmd_status(verify_command(), &status);
+        char label[64];
+        snprintf(label, sizeof(label), "Verification output (exit %d)", status);
+        state_append(state, sizeof(state), label, out);
+        free(out);
+        break;
+      }
+      case ACT_GENERATE_ANSWER: {
+        printf("✨ %sSynthesizing answer via OpenRouter...%s\n", ANSI_MAGENTA, ANSI_RESET);
+        char* g_resp = call_openrouter_generate(state);
+        if (final_answer) free(final_answer);
+        final_answer = extract_content(g_resp);
+        state_append(state, sizeof(state), "Answer generated", final_answer);
+        free(g_resp);
+        break;
+      }
     }
 
     free(c_resp);
     free(decision);
+    if (halt) break;
   }
 
   // Final Output Card

@@ -92,6 +92,19 @@ int main(void) {
   check(extract_number(answers, "confidence_score", "\"confidence\":") == 0.33, "the Score's own confidence");
   check(extract_number(answers, "absent_question", "\"noul\":") == 0.0, "a missing question reads zero");
 
+  // The action space is a table, not a strcmp chain: every name offered to
+  // Classify must parse back to its own action, and anything else is a parse
+  // failure — never a quiet fallthrough to generate_answer.
+  int rt_ok = 1;
+  for (int i = 0; i <= ACT_NO_FIT; i++) {
+    rt_ok &= action_from_string(ACTION_NAMES[i]) == (Action)i;
+  }
+  check(rt_ok, "every offered action name parses back to its own Action");
+  check(action_from_string("none") == ACT_NO_FIT, "none parses as the no-fit decision");
+  check(action_from_string("") == ACT_UNRECOGNIZED, "empty decision is a parse failure");
+  check(action_from_string("generate_answe") == ACT_UNRECOGNIZED,
+        "a typo'd decision is a parse failure, not generate_answer");
+
   check(path_is_in_repo("sys_c.c"), "relative path allowed");
   check(!path_is_in_repo("/etc/passwd"), "absolute path refused");
   check(!path_is_in_repo("../secrets"), "parent traversal refused");
