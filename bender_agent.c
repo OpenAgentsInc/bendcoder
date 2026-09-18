@@ -846,15 +846,64 @@ static char* call_typesafe_pick_file(const char* state_str, const char* listing)
   return resp;
 }
 
+// Patterns search_code has already run, with their outcomes. The picker sees
+// the list so it stops re-proposing the same guesses — MAX_GREP_MATCHES was
+// proposed twice in the run this comes from — and a re-proposed pattern is
+// skipped outright instead of grepped again, because its result is already in
+// the state.
+#define BENDER_MAX_TRACKED_SEARCHES 32
+
+typedef struct {
+  char pattern[256];
+  int missed;
+} SearchRecord;
+
+static SearchRecord search_history[BENDER_MAX_TRACKED_SEARCHES];
+static int search_history_count = 0;
+
+// Consecutive misses without another action between them. It is the
+// deterministic version of the repeats Noul: Jev is asked, but the loop does
+// not wait for it to notice the same action keeps failing.
+static int search_miss_run = 0;
+#define BENDER_SEARCH_MISS_LIMIT 2
+
+static SearchRecord* search_record_find(const char* pattern) {
+  for (int i = 0; i < search_history_count; i++) {
+    if (strcmp(search_history[i].pattern, pattern) == 0) return &search_history[i];
+  }
+  return NULL;
+}
+
+// What the picker needs to know: which patterns already ran and whether they
+// hit, so a new proposal is genuinely new rather than the same guess reworded.
+static void describe_searches(char* out, size_t cap) {
+  size_t o = 0;
+  o += (size_t)snprintf(out + o, cap - o, "Searches already run:");
+  if (search_history_count == 0) {
+    snprintf(out + o, cap - o, " none yet.");
+    return;
+  }
+  for (int i = 0; i < search_history_count && o + 128 < cap; i++) {
+    SearchRecord* r = &search_history[i];
+    o += (size_t)snprintf(out + o, cap - o, "\n- '%s': %s", r->pattern,
+      r->missed ? "no matches — do not propose it again" : "matched");
+  }
+}
+
 // search_code: ask for a literal string, then grep the repository for it. This
 // is how the agent finds the file that matters instead of guessing a name.
 static void do_search_code(char* state, size_t cap, const char* goal) {
+  char tried[4096];
+  describe_searches(tried, sizeof(tried));
+
   char prompt[49152];
   snprintf(prompt, sizeof(prompt),
-    "Goal: %s\n\n"
+    "Goal: %s\n\n%s\n\n"
     "Give one literal string to search this repository for — an identifier, a "
-    "message, a declaration. Not a regular expression. Reply with the string on "
-    "its own and nothing else.\n\nState so far:\n%s", goal, state);
+    "message, a declaration. Not a regular expression. A fragment of the right "
+    "name beats a full guess at it: shorter strings match more. Reply with the "
+    "string on its own and nothing else.\n\nState so far:\n%s",
+    goal, tried, state);
   char* resp = call_openrouter_with_system(
     "You choose one literal search string. Reply with the string alone, nothing else.",
     prompt);
@@ -869,8 +918,36 @@ static void do_search_code(char* state, size_t cap, const char* goal) {
     return;
   }
 
+  // A pattern already run is in the state with its result; running it again
+  // buys nothing and reads as flailing, so it is counted as a miss.
+  SearchRecord* seen = search_record_find(pattern);
+  if (seen) {
+    printf("🚫 %s'%s' was already searched; skipping the repeat.%s\n",
+           ANSI_YELLOW, pattern, ANSI_RESET);
+    char note[640];
+    snprintf(note, sizeof(note),
+      "'%s' was already searched%s — its result is in the state above. "
+      "Shorten it, change it, or read a file the earlier output named.",
+      pattern, seen->missed ? " and missed" : "");
+    state_append(state, cap, "Search skipped", note);
+    search_miss_run++;
+    free(pattern);
+    return;
+  }
+
   printf("🔎 %sSearching the repository for '%s'...%s\n", ANSI_MAGENTA, pattern, ANSI_RESET);
   char* hits = tool_grep(pattern, ".");
+  // A case-insensitive retry reports "No matches found" and then shows what
+  // it found anyway — a hit for convergence purposes, not a miss.
+  int missed = (strncmp(hits, "No matches found", 16) == 0 &&
+                strstr(hits, "case-insensitive") == NULL) ||
+               strncmp(hits, "error:", 6) == 0;
+  if (search_history_count < BENDER_MAX_TRACKED_SEARCHES) {
+    SearchRecord* r = &search_history[search_history_count++];
+    snprintf(r->pattern, sizeof(r->pattern), "%s", pattern);
+    r->missed = missed;
+  }
+  search_miss_run = missed ? search_miss_run + 1 : 0;
   char label[512];
   snprintf(label, sizeof(label), "Search for '%s'", pattern);
   state_append(state, cap, label, hits);
@@ -1257,6 +1334,21 @@ int main(int argc, char** argv) {
       decision = strdup(ACTION_NAMES[ACT_READ_CODE]);
     }
 
+    // A search that keeps missing is not converging, and nothing else in the
+    // loop notices on its own. The same kind of nudge that turns an early
+    // apply_edit into a read sends a repeatedly-missing search_code at
+    // read_code, which can only add information.
+    if (strcmp(decision, ACTION_NAMES[ACT_SEARCH_CODE]) == 0 &&
+        search_miss_run >= BENDER_SEARCH_MISS_LIMIT) {
+      printf("🔁 %s%d searches in a row found nothing; reading instead.%s\n",
+             ANSI_YELLOW, search_miss_run, ANSI_RESET);
+      state_append(state, sizeof(state), "Searches kept missing",
+        "search_code has missed several times running, so the loop is reading "
+        "code instead. The search output above names files worth a look.");
+      free(decision);
+      decision = strdup(ACTION_NAMES[ACT_READ_CODE]);
+    }
+
     // Fallback: If we are on the penultimate or final step and still haven't generated an answer, force generate_answer.
     if (step >= max_steps - 1 && final_answer == NULL && decision[0] != '\0' &&
         strcmp(decision, ACTION_NAMES[ACT_NO_FIT]) != 0 &&
@@ -1301,6 +1393,10 @@ int main(int argc, char** argv) {
     }
 
     snprintf(last_decision, sizeof(last_decision), "%s", decision);
+
+    // Anything that is not search_code — including the reads a stuck search is
+    // nudged into — breaks the miss run.
+    if (action_from_string(decision) != ACT_SEARCH_CODE) search_miss_run = 0;
 
     // 2. Dispatch. The decision string is decoded once and the switch is
     // exhaustive over Action: a string no action owns is a halt, not a

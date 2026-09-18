@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <dirent.h>
@@ -512,6 +513,18 @@ static char* tool_edit(const char* path, const char* old_str, const char* new_st
 #define BENDER_GREP_MAX_LINE 500
 #define BENDER_GREP_MAX_FILE_SIZE (1024 * 1024)
 
+// Lines shown on either side of a hit, like grep -C. A bare "path:N:line"
+// says where a match is but nothing about what contains it — which function,
+// which struct — and the model invented the rest.
+#define BENDER_GREP_CONTEXT 3
+
+// The shortest piece of a missed pattern worth reporting (shorter pieces
+// match everywhere and say nothing), how many file names the report lists,
+// and the room kept for them.
+#define BENDER_FRAG_MIN 4
+#define BENDER_FRAG_MAX_NAMES 6
+#define BENDER_FRAG_NAMES_CAP 768
+
 typedef struct {
   char* data;
   size_t len;
@@ -545,24 +558,62 @@ static void grep_sink_fmt(GrepSink* g, const char* fmt, ...) {
   if (n > 0) grep_sink_put(g, buf, (size_t)n < sizeof(buf) ? (size_t)n : sizeof(buf) - 1);
 }
 
-// Scans one file's bytes. `label` prefixes each hit when searching a tree, and
-// is NULL for a single-file search.
+// The line-level test. The first pass is an exact substring match; the retry
+// a miss earns is case-insensitive and walks the line a byte at a time.
+static int line_has(const char* line, const char* pattern, int ci) {
+  if (!ci) return strstr(line, pattern) != NULL;
+  size_t plen = strlen(pattern);
+  for (const char* p = line; *p; p++) {
+    if (strncasecmp(p, pattern, plen) == 0) return 1;
+  }
+  return 0;
+}
+
+// One output line. Matches use ':' ("path:N:line"), context uses '-'
+// ("path-N-line"), the convention grep -C prints.
+static void grep_emit(GrepSink* g, const char* label, size_t line_no,
+                      const char* text, size_t line_len, char sep) {
+  size_t shown = line_len > BENDER_GREP_MAX_LINE ? BENDER_GREP_MAX_LINE : line_len;
+  const char* clip = shown < line_len ? " ..." : "";
+  if (label) {
+    grep_sink_fmt(g, "%s%c%zu%c%.*s%s\n", label, sep, line_no, sep,
+                  (int)shown, text, clip);
+  } else {
+    grep_sink_fmt(g, "%zu%c%.*s%s\n", line_no, sep, (int)shown, text, clip);
+  }
+}
+
+// Scans one file's bytes. `label` prefixes each line when searching a tree,
+// and is NULL for a single-file search. Hits carry BENDER_GREP_CONTEXT lines
+// on either side, with a "--" between blocks that do not touch.
 static void grep_scan(GrepSink* g, const char* pattern, const char* label,
-                      char* text, size_t len) {
+                      char* text, size_t len, int ci) {
+  // The ring holds the last few lines not yet emitted, so a hit can show the
+  // lines just above it.
+  size_t ring_off[BENDER_GREP_CONTEXT];
+  size_t ring_len[BENDER_GREP_CONTEXT];
+  int ring_n = 0;
+  long emitted = 0;  // highest line number written so far
+  int after = 0;     // trailing context lines still owed to the last hit
+
   size_t line_no = 1;
   size_t i = 0;
   while (i <= len) {
+    if (g->truncated || g->failed) return;
     size_t line_end = i;
     while (line_end < len && text[line_end] != '\n') line_end++;
 
     size_t line_len = line_end - i;
     if (line_len > 0 && text[i + line_len - 1] == '\r') line_len--;  // CRLF
+    // The position after a final newline is a phantom line, not a real one:
+    // it can never match, and as context it would read as a stray blank.
+    if (line_len == 0 && line_end >= len) break;
 
     // The line is NUL-terminated in place for the search and put back after,
     // which keeps the scan allocation-free.
     char saved = text[i + line_len];
     text[i + line_len] = '\0';
-    int hit = strstr(text + i, pattern) != NULL;
+    int hit = line_has(text + i, pattern, ci);
     text[i + line_len] = saved;
 
     if (hit) {
@@ -570,15 +621,35 @@ static void grep_scan(GrepSink* g, const char* pattern, const char* label,
         g->truncated = 1;
         return;
       }
-      size_t shown = line_len > BENDER_GREP_MAX_LINE ? BENDER_GREP_MAX_LINE : line_len;
-      if (label) {
-        grep_sink_fmt(g, "%s:%zu:%.*s%s\n", label, line_no, (int)shown, text + i,
-                      shown < line_len ? " ..." : "");
-      } else {
-        grep_sink_fmt(g, "%zu:%.*s%s\n", line_no, (int)shown, text + i,
-                      shown < line_len ? " ..." : "");
+      // Leading context comes out of the ring; lines already shown stay shown,
+      // and a gap between blocks is marked the way grep marks it.
+      long ctx_from = (long)line_no - ring_n;
+      if (ctx_from < emitted + 1) ctx_from = emitted + 1;
+      long first_out = ctx_from < (long)line_no ? ctx_from : (long)line_no;
+      if (emitted > 0 && first_out > emitted + 1) grep_sink_put(g, "--\n", 3);
+      for (int k = 0; k < ring_n; k++) {
+        long ctx_no = (long)line_no - ring_n + k;
+        if (ctx_no < ctx_from) continue;
+        grep_emit(g, label, (size_t)ctx_no, text + ring_off[k], ring_len[k], '-');
       }
+      grep_emit(g, label, line_no, text + i, line_len, ':');
       g->matches++;
+      emitted = (long)line_no;
+      after = BENDER_GREP_CONTEXT;
+      ring_n = 0;
+    } else if (after > 0) {
+      grep_emit(g, label, line_no, text + i, line_len, '-');
+      emitted = (long)line_no;
+      after--;
+    } else {
+      if (ring_n == BENDER_GREP_CONTEXT) {
+        memmove(ring_off, ring_off + 1, sizeof(ring_off[0]) * (BENDER_GREP_CONTEXT - 1));
+        memmove(ring_len, ring_len + 1, sizeof(ring_len[0]) * (BENDER_GREP_CONTEXT - 1));
+        ring_n--;
+      }
+      ring_off[ring_n] = i;
+      ring_len[ring_n] = line_len;
+      ring_n++;
     }
 
     line_no++;
@@ -594,14 +665,15 @@ static int grep_looks_binary(const char* text, size_t len) {
   return memchr(text, '\0', check) != NULL;
 }
 
-static void grep_file(GrepSink* g, const char* pattern, const char* path, const char* label) {
+static void grep_file(GrepSink* g, const char* pattern, const char* path,
+                      const char* label, int ci) {
   struct stat st;
   if (stat(path, &st) != 0 || !S_ISREG(st.st_mode)) return;
   if (st.st_size > BENDER_GREP_MAX_FILE_SIZE) return;
   size_t len = 0;
   char* text = bender_slurp(path, &len);
   if (!text) return;
-  if (!grep_looks_binary(text, len)) grep_scan(g, pattern, label, text, len);
+  if (!grep_looks_binary(text, len)) grep_scan(g, pattern, label, text, len, ci);
   free(text);
 }
 
@@ -651,7 +723,8 @@ static int is_tracked(const char* path) {
 // `tracked_only` is set when the search root is a relative path, i.e. inside
 // this repository. An absolute path is somewhere else entirely and the
 // repository's tracked set says nothing useful about it.
-static void grep_tree(GrepSink* g, const char* pattern, const char* dir, int tracked_only) {
+static void grep_tree(GrepSink* g, const char* pattern, const char* dir,
+                      int tracked_only, int ci) {
   if (g->truncated || g->failed) return;
   DIR* d = opendir(dir);
   if (!d) return;
@@ -666,17 +739,197 @@ static void grep_tree(GrepSink* g, const char* pattern, const char* dir, int tra
       snprintf(child, sizeof(child), "%s/%s", dir, entry->d_name);
     }
     if (bender_is_dir(child)) {
-      grep_tree(g, pattern, child, tracked_only);
+      grep_tree(g, pattern, child, tracked_only, ci);
     } else if (!tracked_only || is_tracked(child)) {
-      grep_file(g, pattern, child, child);
+      grep_file(g, pattern, child, child, ci);
     }
     if (g->truncated || g->failed) break;
   }
   closedir(d);
 }
 
-// Searches `path` for the literal `pattern`. Returns the matches, a message
-// when there are none, or "error: " text.
+// One pass over the search scope: a file on its own, or the tree under a
+// directory.
+static void grep_run(GrepSink* g, const char* pattern, const char* path, int ci) {
+  if (bender_is_dir(path)) {
+    grep_tree(g, pattern, path, path[0] != '/', ci);
+  } else {
+    grep_file(g, pattern, path, NULL, ci);
+  }
+}
+
+// ----------------------------------------------------------------------------
+// What a miss should say
+// ----------------------------------------------------------------------------
+// "No matches" alone is a dead end: the model guessed a name, guessed wrong,
+// and learned nothing about which part of the guess was real, so it guesses
+// again in the same shape. A miss therefore earns a case-insensitive retry,
+// and if that finds nothing either, the longest prefix and suffix of the
+// pattern that DO appear are reported along with where, so the next guess
+// starts from a piece of something real.
+
+// Substring search over counted bytes — the needles are pieces of the
+// pattern, not NUL-terminated strings of their own. Case-insensitive, like
+// the retry that runs just before this.
+static const char* bender_memmem(const char* hay, size_t haylen,
+                                 const char* needle, size_t nlen) {
+  if (nlen == 0) return hay;
+  if (nlen > haylen) return NULL;
+  for (size_t i = 0; i + nlen <= haylen; i++) {
+    if (strncasecmp(hay + i, needle, nlen) == 0) return hay + i;
+  }
+  return NULL;
+}
+
+typedef struct {
+  const char* pat;
+  size_t plen;
+  size_t best_pre, best_suf;   // longest prefix/suffix of pat seen anywhere
+  size_t pre_files, suf_files; // how many files contain them
+  int pre_named, suf_named;    // how many of those names were kept
+  char pre_names[BENDER_FRAG_NAMES_CAP];
+  char suf_names[BENDER_FRAG_NAMES_CAP];
+} FragScan;
+
+// The longest edge-piece of the pattern present in a buffer. Presence is
+// monotone — if a piece of length k occurs, every shorter piece along the
+// same edge occurs inside it — so binary search needs only a few probes.
+static size_t frag_longest(const char* text, size_t len, const char* pat,
+                           size_t plen, int suffix) {
+  size_t lo = 0, hi = plen - 1;  // the whole pattern already missed
+  while (lo < hi) {
+    size_t mid = lo + (hi - lo + 1) / 2;
+    const char* needle = suffix ? pat + plen - mid : pat;
+    if (bender_memmem(text, len, needle, mid)) lo = mid; else hi = mid - 1;
+  }
+  return lo;
+}
+
+// Files are counted only against the longest piece: any file containing the
+// best fragment has it as its own longest, so the counts stay exact as the
+// best grows.
+static void frag_count(FragScan* fs, int suffix, size_t k, const char* path) {
+  size_t* best = suffix ? &fs->best_suf : &fs->best_pre;
+  size_t* files = suffix ? &fs->suf_files : &fs->pre_files;
+  int* named = suffix ? &fs->suf_named : &fs->pre_named;
+  char* names = suffix ? fs->suf_names : fs->pre_names;
+  if (k == 0 || k < *best) return;
+  if (k > *best) {
+    *best = k;
+    *files = 0;
+    *named = 0;
+    names[0] = '\0';
+  }
+  (*files)++;
+  if (*named < BENDER_FRAG_MAX_NAMES) {
+    size_t used = strlen(names);
+    snprintf(names + used, BENDER_FRAG_NAMES_CAP - used, "%s%s",
+             used ? ", " : "", path);
+    (*named)++;
+  }
+}
+
+static void frag_scan_file(FragScan* fs, const char* path) {
+  struct stat st;
+  if (stat(path, &st) != 0 || !S_ISREG(st.st_mode)) return;
+  if (st.st_size > BENDER_GREP_MAX_FILE_SIZE) return;
+  size_t len = 0;
+  char* text = bender_slurp(path, &len);
+  if (!text) return;
+  if (!grep_looks_binary(text, len)) {
+    frag_count(fs, 0, frag_longest(text, len, fs->pat, fs->plen, 0), path);
+    frag_count(fs, 1, frag_longest(text, len, fs->pat, fs->plen, 1), path);
+  }
+  free(text);
+}
+
+// The same walk as grep_tree, kept separate because one collects lines and
+// the other collects lengths.
+static void frag_tree(FragScan* fs, const char* dir, int tracked_only) {
+  DIR* d = opendir(dir);
+  if (!d) return;
+  struct dirent* entry;
+  while ((entry = readdir(d)) != NULL) {
+    if (entry->d_name[0] == '.') continue;
+    char child[1024];
+    if (strcmp(dir, ".") == 0) {
+      snprintf(child, sizeof(child), "%s", entry->d_name);
+    } else {
+      snprintf(child, sizeof(child), "%s/%s", dir, entry->d_name);
+    }
+    if (bender_is_dir(child)) {
+      frag_tree(fs, child, tracked_only);
+    } else if (!tracked_only || is_tracked(child)) {
+      frag_scan_file(fs, child);
+    }
+  }
+  closedir(d);
+}
+
+// On a complete miss — nothing matched, even case-insensitively — report the
+// longest pieces of the pattern that do appear and the files holding them.
+static char* grep_fragment_hint(const char* pattern, const char* path, int is_dir) {
+  size_t plen = strlen(pattern);
+  // A fragment is always shorter than the pattern, so a pattern this small
+  // has no piece long enough to be worth reporting.
+  if (plen <= BENDER_FRAG_MIN) return NULL;
+
+  FragScan fs;
+  memset(&fs, 0, sizeof(fs));
+  fs.pat = pattern;
+  fs.plen = plen;
+  if (is_dir) {
+    frag_tree(&fs, path, path[0] != '/');
+  } else {
+    frag_scan_file(&fs, path);
+  }
+  if (fs.best_pre < BENDER_FRAG_MIN && fs.best_suf < BENDER_FRAG_MIN) return NULL;
+
+  char pre_txt[96], suf_txt[96];
+  snprintf(pre_txt, sizeof(pre_txt), "%.*s",
+           (int)(fs.best_pre < 90 ? fs.best_pre : 90), pattern);
+  snprintf(suf_txt, sizeof(suf_txt), "%.*s",
+           (int)(fs.best_suf < 90 ? fs.best_suf : 90), pattern + plen - fs.best_suf);
+  // The same piece can be both edges' best (a pattern like "ABXAB" missing
+  // where "AB" occurs); report it once rather than twice.
+  int same_piece = fs.best_pre >= BENDER_FRAG_MIN &&
+                   fs.best_pre == fs.best_suf &&
+                   strcmp(pre_txt, suf_txt) == 0;
+
+  GrepSink m = {NULL, 0, 0, 0, 0, 0};
+  grep_sink_fmt(&m, " Pieces of it do appear:");
+  if (fs.best_pre >= BENDER_FRAG_MIN) {
+    if (is_dir) {
+      grep_sink_fmt(&m, "\n- '%s'%s in %zu file%s: %s%s", pre_txt,
+                    same_piece ? "" : " (prefix)",
+                    fs.pre_files, fs.pre_files == 1 ? "" : "s",
+                    fs.pre_names,
+                    fs.pre_files > (size_t)fs.pre_named ? ", ..." : "");
+    } else {
+      grep_sink_fmt(&m, "\n- '%s'%s in this file", pre_txt,
+                    same_piece ? "" : " (prefix)");
+    }
+  }
+  if (!same_piece && fs.best_suf >= BENDER_FRAG_MIN) {
+    if (is_dir) {
+      grep_sink_fmt(&m, "\n- '%s' (suffix) in %zu file%s: %s%s", suf_txt,
+                    fs.suf_files, fs.suf_files == 1 ? "" : "s",
+                    fs.suf_names,
+                    fs.suf_files > (size_t)fs.suf_named ? ", ..." : "");
+    } else {
+      grep_sink_fmt(&m, "\n- '%s' (suffix) in this file", suf_txt);
+    }
+  }
+  grep_sink_fmt(&m, "\nA shorter pattern, or one of these pieces, will hit.");
+  if (m.failed || !m.data) {
+    free(m.data);
+    return NULL;
+  }
+  return m.data;
+}
+
+// Searches `path` for the literal `pattern`. Returns the matches with their
+// context lines, a message when there are none, or "error: " text.
 static char* tool_grep(const char* pattern, const char* path) {
   if (!pattern || pattern[0] == '\0') {
     return strdup("error: The search pattern is empty, which would match every line.");
@@ -686,20 +939,46 @@ static char* tool_grep(const char* pattern, const char* path) {
   }
 
   GrepSink g = {NULL, 0, 0, 0, 0, 0};
-  if (bender_is_dir(path)) {
-    grep_tree(&g, pattern, path, path[0] != '/');
-  } else {
-    grep_file(&g, pattern, path, NULL);
-  }
-
+  grep_run(&g, pattern, path, 0);
   if (g.failed) {
     free(g.data);
     return strdup("error: out of memory");
   }
+
   if (g.matches == 0) {
     free(g.data);
-    return bender_fmt("No matches found for '%s' in %s.", pattern, path);
+    // A miss earns a second pass, case-insensitive: when the only thing wrong
+    // with the guess was its case, the hits are still worth having.
+    GrepSink gi = {NULL, 0, 0, 0, 0, 0};
+    grep_run(&gi, pattern, path, 1);
+    if (gi.failed) {
+      free(gi.data);
+      return strdup("error: out of memory");
+    }
+    if (gi.matches > 0) {
+      if (gi.truncated) {
+        grep_sink_fmt(&gi, "... (stopped at %d matches; narrow the pattern)\n",
+                      BENDER_GREP_MAX_MATCHES);
+      }
+      if (gi.len > 0 && gi.data[gi.len - 1] == '\n') gi.data[--gi.len] = '\0';
+      char* out = bender_fmt(
+        "No matches found for '%s' in %s, but a case-insensitive search found %zu:\n%s",
+        pattern, path, gi.matches, gi.data);
+      free(gi.data);
+      return out;
+    }
+    free(gi.data);
+
+    // Still nothing, even ignoring case: say which pieces of the pattern do
+    // occur and where, so the next guess starts from something real.
+    char* hint = grep_fragment_hint(pattern, path, bender_is_dir(path));
+    char* out = hint
+      ? bender_fmt("No matches found for '%s' in %s.%s", pattern, path, hint)
+      : bender_fmt("No matches found for '%s' in %s.", pattern, path);
+    free(hint);
+    return out;
   }
+
   if (g.truncated) {
     grep_sink_fmt(&g, "... (stopped at %d matches; narrow the pattern)\n",
                   BENDER_GREP_MAX_MATCHES);

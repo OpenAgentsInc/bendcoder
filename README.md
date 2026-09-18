@@ -45,7 +45,7 @@ so there is one implementation rather than one per caller.
 | `Read` | 1-indexed lines rendered as `N\tline`, with `offset` and `limit`. Refuses directories, warns on an empty file or an offset past EOF, and caps an unbounded read at 256 KB. |
 | `Write` | Full write / overwrite, creating any missing parent directories. Reports whether it created or updated the file. |
 | `Edit` | Exact-match `old_string` → `new_string`. An `old_string` matching more than once is refused with the match count unless `replace_all` is set; an empty `old_string` creates a new file. When the exact string is absent, a candidate with Read's `N<tab>` line-number prefix stripped is tried, and used only if it resolves. |
-| `Grep` | Literal search. A file yields `N:line`; a directory is searched recursively and yields `path:N:line`, so a hit can be handed straight to Read or Edit. Binary files are skipped, long lines clipped, and the match count capped so a common pattern cannot swamp the state. |
+| `Grep` | Literal search. A file yields `N:line`; a directory is searched recursively and yields `path:N:line`, so a hit can be handed straight to Read or Edit. Hits carry a few lines of context, marked `N-line` / `path-N-line` like `grep -C`. Binary files are skipped, long lines clipped, and the match count capped so a common pattern cannot swamp the state. A miss retries case-insensitively; if that finds nothing either, the reply names the longest prefix and suffix of the pattern that do appear and the files holding them, so the next guess starts from something real. |
 
 From Bend (`agent_primitives.bend`):
 
@@ -106,6 +106,16 @@ first one, and a file read to the end drops out of the options. `search_code`
 greps the repository for a literal string, which is how the agent finds the
 file that matters instead of guessing a name; a pattern is open-ended text,
 so it stays with the generation model.
+`read_code` lists the repository on its first pass, then asks the model which
+file to read next and serves it with line numbers. Each file carries a cursor,
+so naming it again serves the next page rather than the first one, and a reply
+that leaks the model's reasoning is mined for a path that actually exists rather
+than taken at face value. `search_code` greps the repository for a literal
+string, which is how the agent finds the file that matters instead of guessing
+a name. Every pattern it runs is recorded with its outcome: the picker is told
+which strings were already tried, a re-proposed one is skipped rather than
+grepped again, and a search that keeps missing is nudged at `read_code`, which
+can only add information.
 
 `BENDER_MAX_STEPS` raises the step ceiling (default 6) for a longer run.
 

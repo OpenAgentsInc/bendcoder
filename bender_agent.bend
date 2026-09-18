@@ -50,8 +50,10 @@ def render_banner() -> IO(Unit):
 # `agent_step` alone decides whether to go round again.
 
 type Progress is Data:
-  # The tool output to fold into the state before the next round.
-  Running{output: String}
+  # The tool output to fold into the state before the next round, plus the
+  # running count of consecutive search misses — the loop's own record of a
+  # search_code that keeps failing, since nothing else notices it.
+  Running{output: String, misses: U32}
   # Classify judged the task done; the loop stops here rather than on fuel.
   Finished{}
   # Classify chose `none`: no listed action fits the state. Halting with the
@@ -91,11 +93,16 @@ def loop_triage_questions() -> List<&2, P.Question>:
 
 # Tool output is both shown and folded into the next round's state, so it
 # arrives reusable (`+`); affine is the default and would reject the reuse.
-def report(+label: String, +out: String) -> IO(Progress):
+def report_misses(+label: String, +out: String, misses: U32) -> IO(Progress):
   do IO<Progress>:
     u1 : Unit <- IO.print(color_yellow("   " ++ label))
     u2 : Unit <- IO.print("   " ++ out)
-    IO.pure(Progress, Running{"\n[" ++ label ++ "]:\n" ++ out})
+    IO.pure(Progress, Running{"\n[" ++ label ++ "]:\n" ++ out, misses})
+
+# Anything that is not a search breaks the miss run, so a plain report resets
+# the count to zero.
+def report(+label: String, +out: String) -> IO(Progress):
+  report_misses(label, out, 0)
 
 # A model asked for one search string routinely prepends its reasoning, so the
 # last non-empty line is taken. Mirrors extract_search_pattern in bender_agent.c.
@@ -106,20 +113,55 @@ def keep_last(best: String, line: String) -> String:
 def pick_last(ls: List<&2, String>, best: String) -> String:
   List.foldl(~&2, ~String, ~String, ~keep_last, ls, best)
 
-def search_with(+pattern: String) -> IO(Progress):
+# A miss reads as the text tool_grep returns for one; an "error:" result (an
+# empty pattern, a bad path) is a failed search all the same. A retry that
+# found hits case-insensitively still says "No matches found", so that phrase
+# only counts as a miss when nothing follows it.
+def search_missed(+hits: String) -> Bool:
+  Bool.or(
+    Bool.and(String.contains(hits, "No matches found"),
+             Bool.not(String.contains(hits, "case-insensitive"))),
+    String.contains(hits, "error:"))
+
+# The report labels every search with its pattern, which is what lets the
+# contains-check below recognise a re-proposed one.
+def search_report(+pattern: String, +hits: String, prev: U32) -> IO(Progress):
+  report_misses(
+    "Search for '" ++ pattern ++ "'",
+    hits,
+    Bool.pick(U32, search_missed(hits), U32.inc(prev), 0))
+
+def search_with(+pattern: String, prev: U32) -> IO(Progress):
   do IO<Progress>:
     u1 : Unit <- IO.print(color_magenta("[TOOL SEARCH] Searching for '") ++ pattern ++ color_magenta("' ..."))
     hits : String <- P.Grep(pattern, ".")
-    report("Search Hits", hits)
+    search_report(pattern, hits, prev)
 
-def act_search_code(state: String) -> IO(Progress):
+# A pattern already run is in the state with its result, so proposing it again
+# is a failed search without even grepping: skipped, but counted all the same.
+def act_search_code.go(+pattern: String, prev: U32, already: Bool) -> IO(Progress):
+  match already:
+    case True{}:
+      report_misses(
+        "Search skipped",
+        "'" ++ pattern ++ "' was already searched; its result is in the state above. Propose a shorter or different string, or read a file instead.",
+        U32.inc(prev))
+    case False{}:
+      search_with(pattern, prev)
+
+# The already-searched test is a computed value, which a match cannot inspect,
+# so it is evaluated here and handed to `go` as a Bool parameter.
+def act_search_code.check(state: String, +pattern: String, prev: U32) -> IO(Progress):
+  act_search_code.go(pattern, prev, String.contains(state, "Search for '" ++ pattern ++ "'"))
+
+def act_search_code(+state: String, prev: U32) -> IO(Progress):
   do IO<Progress>:
     reply : String <- P.GenerateText(
       "openai/gpt-oss-120b:nitro",
       "You choose one literal search string. Reply with the string alone, nothing else.",
-      "State:\n" ++ state ++ "\nGive one literal string to search this repository for. Not a regular expression."
+      "State:\n" ++ state ++ "\nGive one literal string to search this repository for. Not a regular expression. A fragment of the right name beats a full guess at it."
     )
-    search_with(pick_last(String.lines(reply), ""))
+    act_search_code.check(state, pick_last(String.lines(reply), ""), prev)
 
 # Exec returns Done{output} or Fail{(code, output)}, so the loop can finally
 # tell a passing verification from a failing one. A match scrutinizes only a
@@ -150,6 +192,24 @@ def act_read_code() -> IO(Progress):
     content : String <- P.Read("hello.bend", 1, 200)
     report("hello.bend (lines 1-200)", content)
 
+def prepend_search_note(p: Progress) -> IO(Progress):
+  match p:
+    case Running{output, misses}:
+      IO.pure(Progress, Running{
+        "\n[Search kept missing]: search_code missed twice running; read_code was run instead." ++ output,
+        misses})
+    case other:
+      IO.pure(Progress, other)
+
+# A search that keeps missing is not converging, and nothing else in the loop
+# notices on its own: the same nudge that turns an early apply_edit into a
+# read in the C loop sends a repeatedly-missing search_code at read_code.
+def search_stuck_read() -> IO(Progress):
+  do IO<Progress>:
+    u1 : Unit <- IO.print(color_yellow("   [SEARCH STUCK] search_code missed twice running; reading code instead."))
+    p : Progress <- act_read_code()
+    prepend_search_note(p)
+
 def act_generate_answer(state: String) -> IO(Progress):
   do IO<Progress>:
     u1 : Unit <- IO.print(color_magenta("[TOOL GENERATE] Calling LLM (OpenRouter) to generate code ..."))
@@ -163,24 +223,28 @@ def act_generate_answer(state: String) -> IO(Progress):
 # The action arrives already decoded: is_none keeps "none" (a real decision —
 # no listed action fits) distinct from None{} (a decision string no action
 # owns, which used to fall through to generate_answer), and the match is
-# exhaustive over the Action type.
-def dispatch_action(is_none: Bool, a: Maybe<&2, A.Action>, state: String) -> IO(Progress):
-  match is_none a:
-    case True{} _:
+# exhaustive over the Action type. `misses` is the running count of failed
+# searches; `search_stuck` is its comparison against the limit, computed by
+# the caller because a match cannot inspect a computed value.
+def dispatch_action(is_none: Bool, a: Maybe<&2, A.Action>, state: String, misses: U32, search_stuck: Bool) -> IO(Progress):
+  match is_none a search_stuck:
+    case True{} _ _:
       IO.pure(Progress, Stalled{"Classify reported that no listed action fits the current state."})
-    case _ None{}:
+    case _ None{} _:
       IO.pure(Progress, Stalled{"Classify returned a decision that names no action."})
-    case _ Some{A.ReadCode{}}:
+    case _ Some{A.SearchCode{}} True{}:
+      search_stuck_read()
+    case _ Some{A.ReadCode{}} _:
       act_read_code()
-    case _ Some{A.SearchCode{}}:
-      act_search_code(state)
-    case _ Some{A.RunBuild{}}:
+    case _ Some{A.SearchCode{}} _:
+      act_search_code(state, misses)
+    case _ Some{A.RunBuild{}} _:
       act_run_build()
-    case _ Some{A.ApplyEdit{}}:
+    case _ Some{A.ApplyEdit{}} _:
       report("apply_edit unavailable", "apply_edit is not implemented in the Bend loop yet; choose another action.")
-    case _ Some{A.GenerateAnswer{}}:
+    case _ Some{A.GenerateAnswer{}} _:
       act_generate_answer(state)
-    case _ Some{A.TaskComplete{}}:
+    case _ Some{A.TaskComplete{}} _:
       IO.pure(Progress, Finished{})
 
 # The short note an answer makes on the step line, for the questions that are
@@ -201,7 +265,9 @@ def answer_note(a: P.Answer) -> String:
 # the action's own case decides the step. `choice` is printed once and
 # compared twice, hence `+`. A missing or mistyped answer stalls the loop
 # rather than falling through to a generation it never chose — #32's case.
-def run_answers(action: P.Answer, blocked: P.Answer, progress: P.Answer, state: String) -> IO(Progress):
+def run_answers(
+  action: P.Answer, blocked: P.Answer, progress: P.Answer, state: String, +misses: U32
+) -> IO(Progress):
   match action:
     case P.Chosen{+choice, +confidence}:
       do IO<Progress>:
@@ -211,14 +277,15 @@ def run_answers(action: P.Answer, blocked: P.Answer, progress: P.Answer, state: 
           ", blocked " ++ answer_note(blocked) ++
           ", progress " ++ answer_note(progress) ++ ")"))
         u2 : Unit <- IO.print("")
-        dispatch_action(String.eq(choice, "none"), A.parse_action(choice), state)
+        dispatch_action(
+          String.eq(choice, "none"), A.parse_action(choice), state,
+          misses, U32.is_ge(misses, 2))
     case P.Missing{+reason}:
       IO.pure(Progress, Stalled{"Classify returned no answer: " ++ reason})
     case P.Scored{+score, +confidence}:
       IO.pure(Progress, Stalled{"Classify answered 'action' with a score (" ++ F32.show(score) ++ "), not a choice."})
     case P.Nouled{+probability}:
       IO.pure(Progress, Stalled{"Classify answered 'action' with a noul (" ++ F32.show(probability) ++ "), not a choice."})
-
 # One round: fold the last tool output into the state, classify it, run the
 # chosen action, and recurse on the remaining fuel.
 # `fuel` leads the parameter list on two counts: a match reads its scrutinees in
@@ -234,9 +301,9 @@ def agent_step(fuel: Nat, phase: Progress, +step_num: U32, +state: String) -> IO
         IO.print(color_cyan("================================================================================"))
     case f Stalled{reason}:
       IO.print(color_yellow("[STALLED] ") ++ reason)
-    case 0n Running{output}:
+    case 0n Running{output, _}:
       IO.print(color_yellow("[HALT] Max step fuel reached. Pausing agent loop."))
-    case 1n+p Running{+output}:
+    case 1n+p Running{+output, misses}:
       do IO<Unit>:
         u1 : Unit <- IO.print(color_cyan(rule()))
         u2 : Unit <- IO.print(color_bold("[STEP " ++ U32.show(step_num) ++ "] Evaluating State with Classify (TypeSafe System One)..."))
@@ -245,7 +312,7 @@ def agent_step(fuel: Nat, phase: Progress, +step_num: U32, +state: String) -> IO
         action : P.Answer <- P.ParseAnswer(c_raw, "action")
         blocked : P.Answer <- P.ParseAnswer(c_raw, "is_blocked")
         progress : P.Answer <- P.ParseAnswer(c_raw, "progress_score")
-        next : Progress <- run_answers(action, blocked, progress, state ++ output)
+        next : Progress <- run_answers(action, blocked, progress, state ++ output, misses)
         agent_step(p, next, (step_num + 1 : U32), state ++ output)
 
 # The goal is both announced and seeded into the state, so it arrives reusable.
@@ -254,7 +321,7 @@ def run_agent(fuel: Nat, +goal: String) -> IO(Unit):
     u1 : Unit <- render_banner()
     u2 : Unit <- IO.print(color_bold("[GOAL] Initial Goal: ") ++ goal)
     u3 : Unit <- IO.print("")
-    agent_step(fuel, Running{""}, 1, goal)
+    agent_step(fuel, Running{"", 0}, 1, goal)
 
 # Bend has no argv — Base offers only IO.get_env — so the goal arrives as an
 # environment variable, where bender_agent.c takes it from argv[1].
