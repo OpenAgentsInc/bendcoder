@@ -29,9 +29,40 @@ Python-shaped syntax. Four properties matter for an agent:
    `/home/christopherdavid/bend/demos/proof_insertion_sort/LAWS.bend:1-20`)
 
 Bend is *not* a systems language. It has no subprocess, no `argv`, no TLS, no
-directory listing. Those stay in C. The interesting question is not "can Bender
-be all Bend" — it can't — but "which parts of an agent are made materially safer
-by moving them".
+directory listing. Those stay in C.
+
+---
+
+## 0.5 The decision this report is ranked against
+
+This study was originally written to answer "which parts of an agent are made
+materially safer by moving them to Bend". That question has since been settled
+in a stronger form, and the ranking below should be read accordingly.
+
+**Bender targets Bend deliberately, and Bend's strictness is the feature.** Bend
+is a new language that is not in model training data; the fact that an LLM finds
+it hard to write is accepted, and wanted, because it is what stops unverified
+code accumulating. The goal is not to ship a coding agent by the fastest route.
+
+Three consequences for everything below:
+
+1. **"Easier in C" is not a reason.** The only admissible reason to leave
+   something in C is that Bend cannot express it — no subprocess, no TLS, no
+   `dirent`, no `stat`, no `argv`. Where that is the reason, say which primitive
+   is missing.
+2. **The dividing line is capability, not convenience.** Below the line:
+   subprocess execution, HTTPS, directory walking, file metadata, and the
+   byte-level file algorithms. Above it: the action space, the state machine,
+   parsing, guards, and the agent loop itself. Everything above the line belongs
+   in Bend, including code that works acceptably in C today.
+3. **A proof beats a test.** For anything safety-relevant — the path guard above
+   all — a law proved over every input is the goal, not a handful of examples in
+   `test_tools.c`.
+
+The practical target this implies: `bender_agent.bend` becomes the agent, and
+`bender_agent.c` shrinks towards being the FFI shim that `sys_c.c` and
+`tools_c.h` already are. Today it is the other way around — 2,143 lines of C to
+487 of Bend, and the C loop is the one that runs.
 
 ---
 
@@ -54,7 +85,9 @@ itself in a single `<<<OLD>>>`/`<<<NEW>>>` hunk verified by `./run_tests.sh`.
 | 10 | [Transcript as `List<Step>`, not a string blob](#r10) | new `bender_state.bend` | medium | partly |
 | 11 | [Split the agent into modules](#r11) | several | small | ✅ |
 | 12 | [Stop re-implementing Base](#r12) — `String.trim`, `split`, `lines`, `contains`, `Map` | `bender_parse.bend` | small | ✅ |
-| — | [**Don't**: arrays for agent state, GPU `!`, HTTPS in Bend, exec in Bend](#not-worth-doing) | — | — | — |
+| 13 | [Split `tool_read`: line selection and rendering move to Bend with laws](#not-worth-doing) — revised under §0.5 | `tools_c.h`, new Bend module | medium | no |
+| — | [**Can't**: HTTPS, subprocess, `stat`, directory walking — Bend has no primitive](#not-worth-doing) | — | — | — |
+| — | [**Don't**: arrays for agent state, GPU `!` — genuinely wrong tool, not merely harder](#not-worth-doing) | — | — | — |
 
 ---
 
@@ -909,12 +942,18 @@ of these — `bend2/effs/` has 35 primitives and not one of them spawns a proces
 or touches directory metadata. `tools_c.h`'s `bender_mkdir_parents` (:85) and
 `bender_is_dir` (:72) have no Bend equivalent and are correct as C. **Keep.**
 
-**Porting `tool_read`'s line-numbering algorithm to Bend.** It handles BOMs,
-CRLF, the 256 KB cap and the trailing-newline-counts-as-a-line rule
-(`tools_c.h:170-252`). It is well-tested (`test_tools.c:54-67`), it is IO-shaped
-anyway, and rewriting it buys no provable property. **Leave it in C.** Note this
-is different from R5: the *parser* of the model's reply is pure and provable;
-the *file reader* is neither.
+**Porting `tool_read`'s line-numbering algorithm to Bend.** *Revised under §0.5.*
+The original argument was that rewriting it "buys no provable property", which
+was wrong on inspection: reading the bytes is IO, but everything after that —
+splitting on `\n`, the trailing-newline-counts-as-a-line rule, applying `offset`
+and `limit`, rendering `N<tab>line` — is a pure function from a string to a
+string, and it is exactly the piece that produced the `N<tab>` prefix bug in #7.
+Properties worth stating about it: that the rendered line count equals
+`min(limit, total - offset + 1)`, and that stripping the rendered prefixes
+returns the selected lines unchanged, which is the round-trip Edit's fallback
+depends on. **Split it**: `bender_slurp` stays in C because file IO must; the
+line selection and rendering move to Bend with laws. Only the BOM strip and the
+size cap are genuinely IO-adjacent.
 
 **Proving anything about what is on disk.** `IO` is opaque. You cannot state
 "after `apply_edit`, the file contains `new_str`". Prove the pure parts and let
