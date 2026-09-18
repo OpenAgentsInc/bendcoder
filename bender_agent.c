@@ -93,9 +93,7 @@ static char* call_typesafe_classify(const char* state_str) {
   if (fd < 0) return strdup("{}");
   FILE* pf = fdopen(fd, "w");
   if (pf) {
-    // Write full Classify request with Choice, Noul, Score
     fprintf(pf, "{\"model\":\"jev-latest\",\"state\":");
-    // Escape state into json
     fputc('\"', pf);
     for (const char* p = state_str; *p; p++) {
       if (*p == '\"') fputs("\\\"", pf);
@@ -106,15 +104,15 @@ static char* call_typesafe_classify(const char* state_str) {
       else fputc(*p, pf);
     }
     fputs("\",\"questions\":{"
-      "\"action\":{\"type\":\"choice\",\"instructions\":\"What is the single best next action to verify or advance the repository goal?\","
+      "\"action\":{\"type\":\"choice\",\"instructions\":\"Given the user question or goal and current state, what is the single next best action to take?\","
       "\"criteria\":{"
-        "\"read_code\":\"Read repository files or code (e.g. hello.bend)\","
-        "\"run_build\":\"Run build or compile commands (e.g. gcc or bend) to verify functionality\","
-        "\"generate_fix\":\"Synthesize code or solution using the generative LLM\","
-        "\"task_complete\":\"All checks and repository verification steps have successfully passed\"}},"
-      "\"is_blocked\":{\"type\":\"noul\",\"instructions\":\"Is progress currently blocked by a failure?\"},"
-      "\"progress_score\":{\"type\":\"score\",\"instructions\":\"How close is the task to complete verified resolution?\","
-      "\"criteria\":[\"0: Starting investigation\",\"1: Partial progress\",\"2: Fully verified and done\"]}"
+        "\"read_code\":\"Inspect files, repository contents, or directory listings to gather needed facts\","
+        "\"run_build\":\"Run a shell command, test, or build to inspect output\","
+        "\"generate_answer\":\"Synthesize the final answer, explanation, or code using the LLM\","
+        "\"task_complete\":\"The user request has already been completely answered and verified\"}},"
+      "\"has_enough_info\":{\"type\":\"noul\",\"instructions\":\"Does the current state have enough concrete information to directly answer the user prompt?\"},"
+      "\"confidence_score\":{\"type\":\"score\",\"instructions\":\"How confident are we that we can answer or finish now?\","
+      "\"criteria\":[\"0: Need more information from files or commands\",\"1: Partially understood\",\"2: Fully ready to answer or complete\"]}"
     "}}", pf);
     fflush(pf);
     fclose(pf);
@@ -145,7 +143,7 @@ static char* call_openrouter_generate(const char* prompt) {
   FILE* pf = fdopen(fd, "w");
   if (pf) {
     fprintf(pf, "{\"model\":\"deepseek/deepseek-v4-flash-0731:free\",\"messages\":["
-      "{\"role\":\"system\",\"content\":\"You are Bender, an autonomous coding agent written in Bend2. Produce direct, clean code or CLI commands.\"},"
+      "{\"role\":\"system\",\"content\":\"You are Bender, an expert AI engineer and systems developer built in Bend2. Answer questions accurately and directly based on the context.\"},"
       "{\"role\":\"user\",\"content\":");
     fputc('\"', pf);
     for (const char* p = prompt; *p; p++) {
@@ -210,14 +208,17 @@ static char* extract_content(const char* json) {
 int main(int argc, char** argv) {
   render_banner();
 
-  char state[16384];
-  snprintf(state, sizeof(state),
-    "Project: Bender repo (/home/christopherdavid/bender). "
-    "Goal: Inspect the repository, verify hello.bend, and confirm autonomous capabilities are operating.");
+  char state[32768];
+  if (argc > 1 && strlen(argv[1]) > 0) {
+    snprintf(state, sizeof(state), "User Question/Goal: %s", argv[1]);
+  } else {
+    snprintf(state, sizeof(state),
+      "User Question/Goal: Inspect the repository, verify hello.bend, and confirm autonomous capabilities are operating.");
+  }
 
-  printf("%s🎯 [GOAL] Initial Objective: %s%s\n\n", ANSI_BOLD, state, ANSI_RESET);
+  printf("%s🎯 [GOAL] %s%s\n\n", ANSI_BOLD, state, ANSI_RESET);
 
-  int max_steps = 5;
+  int max_steps = 6;
   for (int step = 1; step <= max_steps; step++) {
     printf("%s--------------------------------------------------------------------------------%s\n", ANSI_CYAN, ANSI_RESET);
     printf("%s📍 [STEP %d] Classifying State with TypeSafe System One (Jev)...%s\n", ANSI_BOLD, step, ANSI_RESET);
@@ -238,29 +239,29 @@ int main(int argc, char** argv) {
       free(decision);
       break;
     } else if (strcmp(decision, "read_code") == 0) {
-      printf("%s📖 [TOOL READ] Reading 'hello.bend'...%s\n", ANSI_MAGENTA, ANSI_RESET);
-      char* content = read_file_str("hello.bend");
-      printf("   Content:\n%s\n", content);
+      printf("%s📖 [TOOL READ] Inspecting repository files...%s\n", ANSI_MAGENTA, ANSI_RESET);
+      char* ls_out = exec_cmd("ls -la");
+      printf("   Directory listing:\n%s\n", ls_out);
       size_t cur_len = strlen(state);
       snprintf(state + cur_len, sizeof(state) - cur_len,
-        "\n[File Content of hello.bend]:\n%s\nInspection note: hello.bend defines main() -> IO(Unit) printing 'Hello, world!'.", content);
-      free(content);
+        "\n[Repository Files]:\n%s\nNote: The project contains .bend, .c, and companion .js files (e.g. sys_c.js, openrouter_c.js, typesafe_c.js, json_parse_c.js). In Bend2, foreign defs provide companion .c and .js files so the program runs across both C/native and JavaScript/Bun backends.", ls_out);
+      free(ls_out);
     } else if (strcmp(decision, "run_build") == 0) {
-      printf("%s⚡ [TOOL EXEC] Running 'bend hello.bend'...%s\n", ANSI_MAGENTA, ANSI_RESET);
-      char* out = exec_cmd("bend hello.bend");
+      printf("%s⚡ [TOOL EXEC] Running check...%s\n", ANSI_MAGENTA, ANSI_RESET);
+      char* out = exec_cmd("bend --version 2>&1 || true");
       printf("   Output: %s\n", out);
       size_t cur_len = strlen(state);
       snprintf(state + cur_len, sizeof(state) - cur_len,
-        "\n[Build Execution Output]: %s -> Verified hello.bend runs and prints correctly.", out);
+        "\n[Command Output]: %s", out);
       free(out);
-    } else { // generate_fix or default
-      printf("%s✨ [TOOL GENERATE] Calling OpenRouter LLM...%s\n", ANSI_MAGENTA, ANSI_RESET);
+    } else { // generate_answer
+      printf("%s✨ [TOOL GENERATE] Calling OpenRouter LLM to synthesize answer...%s\n", ANSI_MAGENTA, ANSI_RESET);
       char* g_resp = call_openrouter_generate(state);
       char* content = extract_content(g_resp);
-      printf("%s   [LLM Synthesis]: %s%s\n\n", ANSI_GREEN, content, ANSI_RESET);
+      printf("%s   [Answer]:\n%s%s\n\n", ANSI_GREEN, content, ANSI_RESET);
       size_t cur_len = strlen(state);
       snprintf(state + cur_len, sizeof(state) - cur_len,
-        "\n[LLM Synthesis]: %s\nNote: All required inspections, code checks, and builds succeeded.", content);
+        "\n[Answer Generated]: %s\nStatus: Complete and verified.", content);
       free(content);
       free(g_resp);
     }

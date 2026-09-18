@@ -6,5 +6,5 @@ cd "$DIR"
 # Compile bender_agent.c
 gcc -std=c11 -O3 bender_agent.c -lpthread -lm -o bender_agent_bin
 
-# Run Bender Autonomous Agent with interactive terminal UI
-./bender_agent_bin
+# Run Bender Autonomous Agent with user argument or default
+./bender_agent_bin "$@"
