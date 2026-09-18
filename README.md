@@ -283,7 +283,7 @@ Hello, world!
 ## Agent Primitives: `Classify` & `Generate`
 
 Defined in `agent_primitives.bend`:
-- `Classify(state: String, questions: List<&2, Question>) -> IO(String)`
+- `Classify(state: State, questions: List<&2, Question>) -> IO(String)`
 - `ParseAnswer(json: String, qid: String) -> IO(Answer)`
 - `Generate(model: String, system_prompt: String, prompt: String) -> IO(String)`
 - `GenerateText(model: String, system_prompt: String, prompt: String) -> IO(String)`
@@ -291,6 +291,17 @@ Defined in `agent_primitives.bend`:
 `Classify` returns the raw response; `ParseAnswer` reads one question's object
 out of it as a typed `Answer` — `Chosen`, `Scored`, `Nouled`, or `Missing` for
 a failed request — which every consumer matches on.
+
+`Classify` sends `state` as a JSON object with named fields — `directive`,
+`program`, `observations`, `facts`, `index` and `budget` — rather than one
+hand-escaped string of `[label]:` sections, so a question can point at a
+field with a backticked path such as `observations` or `index.search_hits`
+(design rule 3). `index` is injected retrieval — the repository listing and
+the searches already run travel in every payload — because retrieval the
+model must ask for is not called. `observations` is the slot #14's
+`List<Step>` renders into when it lands; until then the entries are the same
+`[label]:` texts the string state carried, bounded per entry and in total
+with the oldest dropped on purpose.
 
 ### Running the Primitives Pipeline
 
