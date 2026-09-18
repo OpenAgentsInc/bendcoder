@@ -11,8 +11,25 @@ static void check(int cond, const char* what) {
   if (!cond) fails++;
 }
 
+// The scratch directory is overridable so several checkouts can run the suite
+// at once without clobbering each other's files.
+static char scratch[512];
+
+// Returns a fresh allocation rather than a shared static buffer: several of
+// these are held at once, and a static would leave earlier callers pointing at
+// the most recent path.
+static char* scratch_path(const char* leaf) {
+  char buf[1024];
+  snprintf(buf, sizeof(buf), "%s/%s", scratch, leaf);
+  return strdup(buf);
+}
+
 int main(void) {
-  system("rm -rf /tmp/bender_tool_test");
+  const char* base = getenv("BENDER_TEST_DIR");
+  snprintf(scratch, sizeof(scratch), "%s", base && base[0] ? base : "/tmp/bender_tool_test");
+  char rm[600];
+  snprintf(rm, sizeof(rm), "rm -rf '%s'", scratch);
+  if (system(rm) != 0) { /* a missing directory is fine */ }
 
   const char* block =
     "<<<PATH>>>\nsrc/a.c\n<<<OLD>>>\nint x = 1;\n  int y = 2;\n<<<NEW>>>\nint x = 42;\n<<<END>>>\n";
@@ -104,7 +121,7 @@ int main(void) {
   check(strlen(full) == after_first, "the truncation marker is written only once");
 
   // The file tools themselves, round-tripped on a scratch file.
-  const char* tmp = "/tmp/bender_tool_test/nested/f.txt";
+  char* tmp = scratch_path("nested/f.txt");
   char* w = tool_write(tmp, "one\ntwo\nthree\n", 14);
   check(strncmp(w, "File created", 12) == 0, "tool_write creates nested dirs");
   free(w);
@@ -148,11 +165,11 @@ int main(void) {
     "  pclose(pipe);\n"
     "  return;\n"
     "}\n";
-  char* wc = tool_write("/tmp/bender_tool_test/codeish.c", codeish, strlen(codeish));
+  char* wc = tool_write(scratch_path("codeish.c"), codeish, strlen(codeish));
   free(wc);
   // The shape the agent actually failed with: right idea, invented comments
   // and indentation that is not in the file.
-  char* e_near = tool_edit("/tmp/bender_tool_test/codeish.c",
+  char* e_near = tool_edit(scratch_path("codeish.c"),
                            "    // close pipe and ignore exit status\n    pclose(pipe);\n", "x", 0);
   check(e_near && strstr(e_near, "closest text found") != NULL,
         "a near miss reports the closest real text");
@@ -195,8 +212,8 @@ int main(void) {
 
   // A directory searches the tree beneath it and labels each hit with its path,
   // which is what makes grep useful for finding a file rather than guessing one.
-  char* g3 = tool_grep("NINE", "/tmp/bender_tool_test");
-  check(g3 && strstr(g3, "/tmp/bender_tool_test/nested/f.txt:4:NINE") != NULL,
+  char* g3 = tool_grep("NINE", scratch);
+  check(g3 && strstr(g3, "nested/f.txt:4:NINE") != NULL,
         "tool_grep on a directory searches the tree and labels hits with the path");
   free(g3);
 
@@ -210,7 +227,7 @@ int main(void) {
   free(g_tracked);
   // The tracked filter is about this repository; an absolute path is somewhere
   // else and must not be filtered by it, or scratch directories vanish.
-  char* g_abs = tool_grep("NINE", "/tmp/bender_tool_test");
+  char* g_abs = tool_grep("NINE", scratch);
   check(g_abs && strstr(g_abs, "f.txt:4:NINE") != NULL,
         "an absolute path is searched without the tracked filter");
   free(g_abs);
@@ -219,7 +236,7 @@ int main(void) {
   check(strncmp(g4, "error:", 6) == 0, "tool_grep refuses an empty pattern");
   free(g4);
 
-  char* g5 = tool_grep("x", "/tmp/bender_tool_test/no_such_file");
+  char* g5 = tool_grep("x", scratch_path("no_such_file"));
   check(strncmp(g5, "error:", 6) == 0, "tool_grep reports a missing path as an error");
   free(g5);
 
@@ -228,18 +245,18 @@ int main(void) {
   memset(long_line, 'q', sizeof(long_line) - 1);
   long_line[sizeof(long_line) - 1] = '\0';
   memcpy(long_line, "needle", 6);
-  char* w3 = tool_write("/tmp/bender_tool_test/long.txt", long_line, strlen(long_line));
+  char* w3 = tool_write(scratch_path("long.txt"), long_line, strlen(long_line));
   free(w3);
-  char* g6 = tool_grep("needle", "/tmp/bender_tool_test/long.txt");
+  char* g6 = tool_grep("needle", scratch_path("long.txt"));
   check(g6 && strlen(g6) < BENDER_GREP_MAX_LINE + 64, "tool_grep clips an over-long line");
   check(g6 && strstr(g6, "...") != NULL, "tool_grep marks a clipped line");
   free(g6);
 
   // A binary file has no lines worth showing and is skipped rather than dumped.
   char nul_bytes[16] = {'h','i',0,'m','a','t','c','h',0,0,0,0,0,0,0,0};
-  char* w4 = tool_write("/tmp/bender_tool_test/bin.dat", nul_bytes, sizeof(nul_bytes));
+  char* w4 = tool_write(scratch_path("bin.dat"), nul_bytes, sizeof(nul_bytes));
   free(w4);
-  char* g7 = tool_grep("match", "/tmp/bender_tool_test/bin.dat");
+  char* g7 = tool_grep("match", scratch_path("bin.dat"));
   check(g7 && strncmp(g7, "No matches", 10) == 0, "tool_grep skips a binary file");
   free(g7);
 

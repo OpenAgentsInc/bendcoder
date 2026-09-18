@@ -1,13 +1,21 @@
 #!/usr/bin/env bash
 # Verification target for the self-improvement loop: the file tools, the agent's
 # own helpers, and that both Bend programs still check and build.
+#
+# Every artefact goes in a per-run temp directory, so several checkouts can run
+# this at once — which is what delegating a batch of issues to parallel agents
+# in separate worktrees does.
 set -e
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$DIR"
 
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/bender_tests_XXXXXX")"
+trap 'rm -rf "$WORK"' EXIT
+export BENDER_TEST_DIR="$WORK/scratch"
+
 echo "== tools and agent helpers =="
-gcc -std=c11 -O1 -Wall -Wextra -I. test_tools.c -o /tmp/bender_test_tools
-/tmp/bender_test_tools
+gcc -std=c11 -O1 -Wall -Wextra -I. test_tools.c -o "$WORK/test_tools"
+"$WORK/test_tools"
 
 echo
 echo "== C runtime compiles =="
@@ -19,8 +27,8 @@ bend hello.bend >/dev/null
 # bender_agent.bend uses only some of the laws sys_c.c defines, so this also
 # guards the #ifdef CID_* guards in sys_c.c against regressing (issue #5).
 echo "== bender_agent.bend checks and builds =="
-bend bender_agent.bend -o /tmp/bender_loop.c >/dev/null
-gcc -std=c11 -O1 -I. /tmp/bender_loop.c -lpthread -lm -o /tmp/bender_loop_bin
+bend bender_agent.bend -o "$WORK/bender_loop.c" >/dev/null
+gcc -std=c11 -O1 -I. "$WORK/bender_loop.c" -lpthread -lm -o "$WORK/bender_loop_bin"
 
 echo
 echo "All checks passed."

@@ -10,7 +10,7 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$DIR"
 
 ISSUE="${1:?usage: delegate-devin.sh <issue-number> [permission-mode]}"
-MODE="${2:-smart}"
+MODE="${2:-dangerous}"
 
 if [ -n "$(git status --porcelain)" ]; then
   echo "Working tree is dirty. Commit or stash first so the agent's changes are legible."
