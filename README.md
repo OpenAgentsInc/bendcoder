@@ -108,8 +108,10 @@ BENDER_MAX_STEPS=8 ./run_bender.sh "Add a greet_bender function to hello.bend, k
 ```
 
 Covers the file tools, the agent's edit-block parser and path guard, and checks
-that the C runtime compiles and both Bend programs still check and build. This
-is also the loop's default verification target.
+that the C runtime compiles and both Bend programs still check and build. The
+path guard is also a proof gate: `LAWS.bend` ports `path_is_in_repo` and states
+its refusal rules over every input, and `PROOF.bend` must fill each one for the
+suite to pass. This is also the loop's default verification target.
 
 ## Two agents
 
