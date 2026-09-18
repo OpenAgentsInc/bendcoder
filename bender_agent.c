@@ -728,6 +728,7 @@ int main(int argc, char** argv) {
   const double REPEATS_FLOOR = 0.60;
   const int MAX_LOW_CONFIDENCE = 3;
 
+  int halted_early = 0;
   int low_confidence_run = 0;
   char last_decision[64] = "";
   int max_steps = 6;
@@ -798,6 +799,7 @@ int main(int argc, char** argv) {
     if (low_confidence_run >= MAX_LOW_CONFIDENCE) {
       printf("🛑 %s%d steps below the confidence floor (%.2f); stopping rather than flailing.%s\n",
              ANSI_YELLOW, low_confidence_run, CONFIDENCE_FLOOR, ANSI_RESET);
+      halted_early = 1;
       free(c_resp);
       free(decision);
       break;
@@ -812,6 +814,7 @@ int main(int argc, char** argv) {
       // loop as a confident decision to generate. See #32.
       printf("⚠️  %sClassify returned no answer; halting rather than guessing.%s\n",
              ANSI_YELLOW, ANSI_RESET);
+      halted_early = 1;
       free(c_resp);
       free(decision);
       break;
@@ -820,6 +823,7 @@ int main(int argc, char** argv) {
       // given the option — its probabilities always sum to one.
       printf("🛑 %sNo listed action fits the current state; stopping.%s\n",
              ANSI_YELLOW, ANSI_RESET);
+      halted_early = 1;
       state_append(state, sizeof(state), "Stalled",
         "Classify reported that no listed action fits the current state.");
       free(c_resp);
@@ -857,10 +861,12 @@ int main(int argc, char** argv) {
     free(decision);
   }
 
-  // Final Output Card
-  printf("\n%s================================================================================%s\n", ANSI_GREEN, ANSI_RESET);
-  printf("%s  ✅ TASK COMPLETE%s\n", ANSI_BOLD, ANSI_RESET);
-  printf("%s================================================================================%s\n\n", ANSI_GREEN, ANSI_RESET);
+  // Final Output Card. A run that halted on a failed request or on a stall did
+  // not complete anything, and saying so beats a green banner over a failure.
+  const char* colour = halted_early ? ANSI_YELLOW : ANSI_GREEN;
+  printf("\n%s================================================================================%s\n", colour, ANSI_RESET);
+  printf("%s  %s%s\n", ANSI_BOLD, halted_early ? "⚠️  STOPPED EARLY" : "✅ TASK COMPLETE", ANSI_RESET);
+  printf("%s================================================================================%s\n\n", colour, ANSI_RESET);
 
   if (final_answer && strlen(final_answer) > 0) {
     printf("%s%s\n\n", ANSI_RESET, final_answer);
