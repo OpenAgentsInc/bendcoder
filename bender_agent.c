@@ -269,6 +269,13 @@ int main(int argc, char** argv) {
     double score = extract_number(c_resp, "\"score\":");
     double noul = extract_number(c_resp, "\"noul\":");
 
+    // Guardrail: If Jev wants to generate an answer but info_prob (noul) is low (< 0.60),
+    // force reading repository context first so it doesn't hallucinate.
+    if (strcmp(decision, "generate_answer") == 0 && noul < 0.60) {
+      free(decision);
+      decision = strdup("read_code");
+    }
+
     printf("🧠 %sAction Selected:%s %s%-16s%s %s(conf: %.2f, info_prob: %.2f, score: %.2f)%s\n",
       ANSI_BOLD, ANSI_RESET,
       ANSI_YELLOW, decision, ANSI_RESET,
@@ -280,11 +287,13 @@ int main(int argc, char** argv) {
       free(decision);
       break;
     } else if (strcmp(decision, "read_code") == 0) {
-      printf("📖 %sInspecting repository context...%s\n", ANSI_MAGENTA, ANSI_RESET);
+      printf("📖 %sInspecting repository context (README.md & files)...%s\n", ANSI_MAGENTA, ANSI_RESET);
+      char* readme = read_file_str("README.md");
       char* ls_out = exec_cmd("ls -la");
       size_t cur_len = strlen(state);
       snprintf(state + cur_len, sizeof(state) - cur_len,
-        "\n[Repository Files]:\n%s\nNote: The project contains .bend and .c files. In Bend2, a foreign def imports a .c file that builds into the native binary.", ls_out);
+        "\n[Repository Documentation (README.md)]:\n%s\n[Repository Files]:\n%s", readme, ls_out);
+      free(readme);
       free(ls_out);
     } else if (strcmp(decision, "run_build") == 0) {
       printf("⚡ %sRunning build check: 'bend hello.bend'...%s\n", ANSI_MAGENTA, ANSI_RESET);
