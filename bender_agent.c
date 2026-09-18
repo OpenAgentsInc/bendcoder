@@ -432,6 +432,11 @@ static char* extract_search_pattern(const char* reply) {
   return out;
 }
 
+// Set when an edit is refused for an unread file. The refusal already knows
+// exactly which file is needed; without this the next read makes a fresh
+// generation call and routinely picks a different one.
+static char pending_read[256] = "";
+
 // How far each file has been read, so a repeat request serves the next page
 // instead of the same first page again.
 #define BENDER_MAX_TRACKED_READS 32
@@ -536,6 +541,25 @@ static void do_read_code(char* state, size_t cap, const char* goal, int read_pha
     return;
   }
 
+  // A refused edit already named the file it needed; serve that rather than
+  // asking a model to guess again.
+  if (pending_read[0]) {
+    char* wanted = strdup(pending_read);
+    pending_read[0] = '\0';
+    ReadCursor* c = read_cursor_for(wanted);
+    long from = c ? c->next_line : 1;
+    printf("📖 %sReading '%s' from line %ld (named by the refused edit)...%s\n",
+           ANSI_MAGENTA, wanted, from, ANSI_RESET);
+    char* text = tool_read(wanted, from, BENDER_READ_PAGE);
+    char label[512];
+    snprintf(label, sizeof(label), "%s (from line %ld)", wanted, from);
+    state_append(state, cap, label, text);
+    if (c) c->next_line = from + BENDER_READ_PAGE;
+    free(text);
+    free(wanted);
+    return;
+  }
+
   char already[4096];
   describe_reads(already, sizeof(already));
 
@@ -631,6 +655,7 @@ static void do_apply_edit(char* state, size_t cap, const char* goal) {
       "%s has not been read yet, so the edit was refused. Read it first, then "
       "quote its text exactly.", path);
     state_append(state, cap, "Edit refused", note);
+    snprintf(pending_read, sizeof(pending_read), "%s", path);
     free(path); free(old_str); free(new_str);
     return;
   }
