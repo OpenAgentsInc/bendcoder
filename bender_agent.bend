@@ -86,7 +86,8 @@ def loop_triage_questions() -> List<&2, P.Question>:
         P.Opt{"search_code", "Search the repository for a literal string to find which files are relevant"},
         P.Opt{"run_build", "Run build, compile, or test command to check if code works or reproduces an error"},
         P.Opt{"generate_fix", "Synthesize code, write a patch, or generate a fix using the LLM"},
-        P.Opt{"task_complete", "The task is successfully resolved, verified, and complete"}
+        P.Opt{"task_complete", "The task is successfully resolved, verified, and complete"},
+        P.Opt{"none", "No listed action fits: the state does not yet support a next step"}
       ]
     },
     P.NoulQ{
