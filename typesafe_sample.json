@@ -1,0 +1,32 @@
+{
+  "state": "Help! My payouts have been failing for 3 days and I need this resolved urgently.",
+  "model": "jev-latest",
+  "questions": {
+    "is_urgent": {
+      "type": "noul",
+      "instructions": "Does this message convey urgency or time-sensitivity?",
+      "criteria": {
+        "true": "Explicitly urgent or time-sensitive",
+        "false": "No urgency expressed"
+      }
+    },
+    "department": {
+      "type": "choice",
+      "instructions": "Which department should handle this request?",
+      "criteria": {
+        "billing": "Payments, invoicing, refunds, subscriptions",
+        "technical": "Bugs, outages, API errors, integration issues",
+        "sales": "Pricing, upgrades, enterprise questions"
+      }
+    },
+    "frustration": {
+      "type": "score",
+      "instructions": "How frustrated does the customer appear?",
+      "criteria": [
+        "Calm, just stating facts",
+        "Frustrated but polite",
+        "Very angry, escalating"
+      ]
+    }
+  }
+}
