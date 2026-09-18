@@ -7,6 +7,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/wait.h>
+#include <ctype.h>
 
 // Read / Write / Edit, shared with the Bend FFI layer in sys_c.c.
 #include "tools_c.h"
@@ -345,6 +346,89 @@ static void trim_inplace(char* s) {
   }
 }
 
+// A model that leaks its reasoning into the answer is the normal case, not the
+// exception, so the picker's reply is mined for a path rather than trusted as
+// one: the last token that names a file which actually exists wins. Returns a
+// malloc'd path, or NULL when the reply contains no usable one.
+static char* extract_existing_path(const char* reply) {
+  size_t len = strlen(reply);
+  char* buf = malloc(len + 1);
+  if (!buf) return NULL;
+
+  char* best = NULL;
+  size_t i = 0;
+  while (i < len) {
+    // Tokens are split on whitespace and on the punctuation a sentence leaves
+    // around a path ("...read test_tools.c content via..." yields the path).
+    while (i < len && (isspace((unsigned char)reply[i]) || strchr("`'\"(),:;", reply[i]))) i++;
+    size_t start = i;
+    while (i < len && !isspace((unsigned char)reply[i]) && !strchr("`'\"(),:;", reply[i])) i++;
+    size_t tok_len = i - start;
+    if (tok_len == 0 || tok_len > len) continue;
+    memcpy(buf, reply + start, tok_len);
+    buf[tok_len] = '\0';
+    // Trailing sentence punctuation is not part of the name.
+    while (tok_len > 0 && (buf[tok_len - 1] == '.' || buf[tok_len - 1] == '!' ||
+                           buf[tok_len - 1] == '?')) {
+      buf[--tok_len] = '\0';
+    }
+    if (tok_len == 0) continue;
+    if (!path_is_in_repo(buf) || !bender_exists(buf) || bender_is_dir(buf)) continue;
+    free(best);
+    best = strdup(buf);
+  }
+  free(buf);
+  return best;
+}
+
+// How far each file has been read, so a repeat request serves the next page
+// instead of the same first page again.
+#define BENDER_MAX_TRACKED_READS 32
+#define BENDER_READ_PAGE 200
+
+typedef struct {
+  char path[256];
+  long next_line;  // 1-indexed line the next page starts at
+  int exhausted;   // the last page ran past the end of the file
+} ReadCursor;
+
+static ReadCursor read_cursors[BENDER_MAX_TRACKED_READS];
+static int read_cursor_count = 0;
+
+static ReadCursor* read_cursor_for(const char* path) {
+  for (int i = 0; i < read_cursor_count; i++) {
+    if (strcmp(read_cursors[i].path, path) == 0) return &read_cursors[i];
+  }
+  if (read_cursor_count >= BENDER_MAX_TRACKED_READS) return NULL;
+  ReadCursor* c = &read_cursors[read_cursor_count++];
+  snprintf(c->path, sizeof(c->path), "%s", path);
+  c->next_line = 1;
+  c->exhausted = 0;
+  return c;
+}
+
+// Describes what has already been read, so the model can ask for the next page
+// of a file it has seen part of, or move on from one it has seen all of.
+static void describe_reads(char* out, size_t cap) {
+  size_t o = 0;
+  o += (size_t)snprintf(out + o, cap - o, "Files already read:");
+  if (read_cursor_count == 0) {
+    snprintf(out + o, cap - o, " none yet.");
+    return;
+  }
+  for (int i = 0; i < read_cursor_count && o + 128 < cap; i++) {
+    ReadCursor* c = &read_cursors[i];
+    if (c->exhausted) {
+      o += (size_t)snprintf(out + o, cap - o,
+        "\n- %s: read in full, do not ask for it again.", c->path);
+    } else {
+      o += (size_t)snprintf(out + o, cap - o,
+        "\n- %s: read through line %ld; naming it again serves the next page.",
+        c->path, c->next_line - 1);
+    }
+  }
+}
+
 // read_code: let the model name the file worth reading next, then serve it
 // with line numbers. The first read lists the repository instead, so the
 // choice is made against what is actually there.
@@ -360,30 +444,52 @@ static void do_read_code(char* state, size_t cap, const char* goal, int read_pha
     return;
   }
 
+  char already[4096];
+  describe_reads(already, sizeof(already));
+
   char prompt[49152];
   snprintf(prompt, sizeof(prompt),
-    "Goal: %s\n\n"
+    "Goal: %s\n\n%s\n\n"
     "Name the single file most worth reading next to advance this goal. "
-    "Reply with the relative path and nothing else.\n\nState so far:\n%s", goal, state);
+    "Reply with the relative path and nothing else.\n\nState so far:\n%s",
+    goal, already, state);
   char* resp = call_openrouter_with_system(
     "You pick one file to read. Reply with a bare relative path, nothing else.",
     prompt);
-  char* path = extract_content(resp);
+  char* reply = extract_content(resp);
   free(resp);
-  trim_inplace(path);
 
-  if (!path_is_in_repo(path)) {
-    printf("🚫 %sRefusing to read outside the repository: '%s'%s\n", ANSI_YELLOW, path, ANSI_RESET);
-    state_append(state, cap, "Read refused", "The requested path is outside the repository.");
-    free(path);
+  char* path = extract_existing_path(reply);
+  if (!path) {
+    printf("🚫 %sNo readable file named in the reply.%s\n", ANSI_YELLOW, ANSI_RESET);
+    state_append(state, cap, "Read failed",
+      "The reply named no file that exists in this repository. Reply with a bare relative path.");
+    free(reply);
     return;
   }
+  free(reply);
 
-  printf("📖 %sReading '%s'...%s\n", ANSI_MAGENTA, path, ANSI_RESET);
-  char* content = tool_read(path, 1, 200);
-  char label[512];
-  snprintf(label, sizeof(label), "%s (lines 1-200)", path);
-  state_append(state, cap, label, content);
+  ReadCursor* cursor = read_cursor_for(path);
+  long offset = cursor ? cursor->next_line : 1;
+
+  printf("📖 %sReading '%s' from line %ld...%s\n", ANSI_MAGENTA, path, offset, ANSI_RESET);
+  char* content = tool_read(path, offset, BENDER_READ_PAGE);
+
+  // A warning back from Read means the offset ran past the end: the file is
+  // done, and saying so is more use to the model than the warning itself.
+  int past_end = strncmp(content, "<system-reminder>Warning: the file exists but is shorter", 55) == 0;
+  if (past_end && cursor) {
+    cursor->exhausted = 1;
+    char note[512];
+    snprintf(note, sizeof(note), "%s has been read in full; nothing further to read there.", path);
+    state_append(state, cap, "Read complete", note);
+  } else {
+    char label[512];
+    snprintf(label, sizeof(label), "%s (from line %ld)", path, offset);
+    state_append(state, cap, label, content);
+    if (cursor) cursor->next_line = offset + BENDER_READ_PAGE;
+  }
+
   free(content);
   free(path);
 }

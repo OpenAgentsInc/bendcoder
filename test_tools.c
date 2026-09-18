@@ -31,6 +31,23 @@ int main(void) {
   check(empty && empty[0] == '\0', "empty OLD section parses as empty string");
   free(empty);
 
+  // The picker's reply routinely carries the model's reasoning; a path must
+  // still be recovered from it, and refused when there is none.
+  char* p1 = extract_existing_path("tools_c.h");
+  check(p1 && strcmp(p1, "tools_c.h") == 0, "bare path extracted");
+  free(p1);
+  char* p2 = extract_existing_path(
+    "We need to view test_tools.c.We need to request the file content. So answer: test_tools.c");
+  check(p2 && strcmp(p2, "test_tools.c") == 0, "path extracted from leaked reasoning");
+  free(p2);
+  char* p3 = extract_existing_path("Let's read `run_tests.sh` next.");
+  check(p3 && strcmp(p3, "run_tests.sh") == 0, "path extracted from backticks");
+  free(p3);
+  check(extract_existing_path("I am not sure which file to read.") == NULL,
+        "reply naming no real file is refused");
+  check(extract_existing_path("/etc/passwd") == NULL, "absolute path not extracted");
+  check(extract_existing_path("docs") == NULL, "directory not extracted");
+
   check(path_is_in_repo("sys_c.c"), "relative path allowed");
   check(!path_is_in_repo("/etc/passwd"), "absolute path refused");
   check(!path_is_in_repo("../secrets"), "parent traversal refused");
