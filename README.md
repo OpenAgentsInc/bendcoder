@@ -124,7 +124,11 @@ suite to pass. This is also the loop's default verification target.
 
 `bender_agent.c` is the agent `run_bender.sh` builds and runs: it has the full
 loop, including `apply_edit` and rollback. `bender_agent.bend` is the same loop
-written in Bend, over the primitives in `agent_primitives.bend`:
+written in Bend, over the primitives in `agent_primitives.bend` — its
+`apply_edit` drafts one `<<<PATH>>>`/`<<<OLD>>>`/`<<<NEW>>>` group per edit
+(a reply carrying more is refused rather than half-applied), verifies with
+`BENDER_VERIFY_CMD`, and restores the `ReadFile` snapshot with `WriteFile`,
+so a file the edit created is left empty rather than removed:
 
 ```bash
 bend bender_agent.bend -o bender_loop.c
