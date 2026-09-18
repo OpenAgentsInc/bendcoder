@@ -21,8 +21,18 @@ echo
 echo "== C runtime compiles =="
 gcc -std=c11 -O1 -Wall -Wextra -fsyntax-only bender_agent.c
 
-echo "== hello.bend runs =="
-bend hello.bend >/dev/null
+# A .bend file's expected stdout lives in the file as `#|` lines — the same
+# convention Bend's own gate uses (~/bend/gates/test.ts) — so a change and its
+# test fit one hunk in one file, which is the shape the loop's apply_edit can
+# produce. Files without `#|` lines are skipped.
+echo "== bend expected output (#|) =="
+for f in *.bend; do
+  grep -q '^#|' "$f" || continue
+  want="$(grep '^#|' "$f" | sed 's/^#|//')"
+  got="$(bend "$f" 2>"$WORK/$f.err")" || { echo "FAIL: $f"; cat "$WORK/$f.err"; exit 1; }
+  [ "$got" = "$want" ] || { echo "FAIL: $f"; diff <(printf '%s\n' "$want") <(printf '%s\n' "$got") || true; exit 1; }
+  echo "PASS: $f"
+done
 
 # bender_agent.bend uses only some of the laws sys_c.c defines, so this also
 # guards the #ifdef CID_* guards in sys_c.c against regressing (issue #5).
