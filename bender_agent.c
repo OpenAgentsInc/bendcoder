@@ -259,6 +259,7 @@ int main(int argc, char** argv) {
   printf("%s🎯 [GOAL]%s %s\n\n", ANSI_BOLD, ANSI_RESET, goal_prompt);
 
   char* final_answer = NULL;
+  int read_phase = 0;
   for (int step = 1; step <= 6; step++) {
     printf("%s─── Step %d: Jev Classification ──────────────────────────────────────────%s\n", ANSI_CYAN, step, ANSI_RESET);
 
@@ -269,11 +270,17 @@ int main(int argc, char** argv) {
     double score = extract_number(c_resp, "\"score\":");
     double noul = extract_number(c_resp, "\"noul\":");
 
-    // Guardrail: If Jev wants to generate an answer but info_prob (noul) is low (< 0.60),
-    // force reading repository context first so it doesn't hallucinate.
-    if (strcmp(decision, "generate_answer") == 0 && noul < 0.60) {
+    // Guardrail: Only override generate_answer to read_code if we haven't read any code yet (read_phase == 0).
+    // Once code has been read, trust generate_answer and do not trap the agent in an infinite read loop.
+    if (strcmp(decision, "generate_answer") == 0 && read_phase == 0 && noul < 0.60) {
       free(decision);
       decision = strdup("read_code");
+    }
+
+    // Fallback: If we are on the penultimate or final step and still haven't generated an answer, force generate_answer.
+    if (step >= 5 && final_answer == NULL && strcmp(decision, "task_complete") != 0) {
+      free(decision);
+      decision = strdup("generate_answer");
     }
 
     printf("🧠 %sAction Selected:%s %s%-16s%s %s(conf: %.2f, info_prob: %.2f, score: %.2f)%s\n",
@@ -287,14 +294,24 @@ int main(int argc, char** argv) {
       free(decision);
       break;
     } else if (strcmp(decision, "read_code") == 0) {
-      printf("📖 %sInspecting repository context (README.md & files)...%s\n", ANSI_MAGENTA, ANSI_RESET);
-      char* readme = read_file_str("README.md");
-      char* ls_out = exec_cmd("ls -la");
-      size_t cur_len = strlen(state);
-      snprintf(state + cur_len, sizeof(state) - cur_len,
-        "\n[Repository Documentation (README.md)]:\n%s\n[Repository Files]:\n%s", readme, ls_out);
-      free(readme);
-      free(ls_out);
+      read_phase++;
+      if (read_phase == 1) {
+        printf("📖 %sInspecting repository overview (README.md & hello.bend)...%s\n", ANSI_MAGENTA, ANSI_RESET);
+        char* readme = read_file_str("README.md");
+        char* hello = read_file_str("hello.bend");
+        size_t cur_len = strlen(state);
+        snprintf(state + cur_len, sizeof(state) - cur_len,
+          "\n[README.md]:\n%s\n[hello.bend]:\n%s", readme, hello);
+        free(readme);
+        free(hello);
+      } else {
+        printf("📖 %sInspecting core Bend code (agent_primitives.bend)...%s\n", ANSI_MAGENTA, ANSI_RESET);
+        char* prims = read_file_str("agent_primitives.bend");
+        size_t cur_len = strlen(state);
+        snprintf(state + cur_len, sizeof(state) - cur_len,
+          "\n[agent_primitives.bend]:\n%s", prims);
+        free(prims);
+      }
     } else if (strcmp(decision, "run_build") == 0) {
       printf("⚡ %sRunning build check: 'bend hello.bend'...%s\n", ANSI_MAGENTA, ANSI_RESET);
       char* out = exec_cmd("bend hello.bend");
