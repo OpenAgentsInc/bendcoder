@@ -39,6 +39,12 @@ done
 echo "== action.bend proves its laws =="
 bend action.bend >/dev/null
 
+# The path guard is proved rather than exemplified: LAWS.bend states the
+# refusal rules over every input and PROOF.bend fills each one, so an
+# unproved law fails here the way a failing test does.
+echo "== PROOF.bend proves the path guard =="
+bend PROOF.bend >/dev/null
+
 # bender_agent.bend uses only some of the laws sys_c.c defines, so this also
 # guards the #ifdef CID_* guards in sys_c.c against regressing (issue #5).
 echo "== bender_agent.bend checks and builds =="
