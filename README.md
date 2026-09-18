@@ -78,6 +78,20 @@ a name.
 
 `BENDER_MAX_STEPS` raises the step ceiling (default 6) for a longer run.
 
+## Bend Constraints (Bend 2.0.5)
+
+- **Affine by default** – `+x` marks a reusable `Data` parameter or match field.
+- **Match restrictions** – `match` only inspects parameters and fields, never computed values. A `let` before a `match` on a parameter is rejected.
+- **Multi‑scrutinee order** – `match a b:` follows the binder order of `a` then `b`.
+- **No forward references** – top‑level mutual recursion is impossible; this enforces totality.
+- **Self‑call shrinking** – a recursive call must pass each argument unchanged until one structurally shrinks, and this rule also applies inside `do IO` blocks (e.g., `step(state ++ "x")` is rejected).
+- **No `argv`** – use `IO.get_env` for input; the goal arrives via the environment.
+- **Qualified constructors** – when pattern‑matching on an imported type, constructors must be qualified, e.g., `case A.ReadCode{}`.
+- **FFI law handling** – `law` + `def … import "./file.c"` emits `#define CID_<NAME>` only for laws reachable from `main`; see the `#ifdef` guards in `sys_c.c`.
+- **Typed let in `do`** – inside a `do` block a `let` requires an explicit type annotation: `x : String = v`.
+
+These constraints are important for the agent to avoid repeated compilation failures.
+
 ```bash
 BENDER_MAX_STEPS=8 ./run_bender.sh "Add a greet_bender function to hello.bend, keeping main working."
 ```
