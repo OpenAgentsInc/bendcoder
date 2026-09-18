@@ -33,6 +33,30 @@ def openrouter.post(payload):
   import "./openrouter_c.js"
 
 # ------------------------------------------------------------------------------
+# Low-level FFI: Subprocess & File System Tools
+# ------------------------------------------------------------------------------
+law command.run:
+  String -> IO(String)
+
+def command.run(cmd):
+  import "./sys_c.c"
+  import "./sys_c.js"
+
+law sys.read_file:
+  String -> IO(String)
+
+def sys.read_file(path):
+  import "./sys_c.c"
+  import "./sys_c.js"
+
+law sys.write_file:
+  String -> String -> IO(Unit)
+
+def sys.write_file(path, content):
+  import "./sys_c.c"
+  import "./sys_c.js"
+
+# ------------------------------------------------------------------------------
 # JSON String escaping
 # ------------------------------------------------------------------------------
 def json_escape_char(c: Char) -> String:
@@ -143,57 +167,13 @@ def Generate(model: String, system_prompt: String, prompt: String) -> IO(String)
     openrouter.post(payload)
 
 # ------------------------------------------------------------------------------
-# Demonstration / Test
+# The Tool Primitives
 # ------------------------------------------------------------------------------
-def agent_state() -> String:
-  "Compiler error in file 'agent.c': undefined reference to symbol 'curl_easy_init'. Build aborted with code 1. User wants to fix the build immediately."
+def Exec(cmd: String) -> IO(String):
+  command.run(cmd)
 
-def agent_questions() -> List<&2, Question>:
-  [
-    ChoiceQ{
-      "next_action",
-      "What is the best immediate action for the agent to take to resolve this error?",
-      [
-        Opt{"add_dependency", "Add missing link library like -lcurl to compiler flags or build script"},
-        Opt{"rewrite_code", "Rewrite the source code to remove or rename curl functions"},
-        Opt{"ask_user", "Stop and ask the user for clarification"},
-        Opt{"ignore_error", "Ignore error and continue"}
-      ]
-    },
-    NoulQ{
-      "is_fatal_blocker",
-      "Does this build failure block progress and require immediate resolution?"
-    },
-    ScoreQ{
-      "fix_complexity",
-      "Estimate the complexity of fixing this linker issue",
-      [
-        "Trivial: 1-line flag or install fix",
-        "Moderate: build configuration adjustments",
-        "Complex: major architectural changes"
-      ]
-    }
-  ]
+def ReadFile(path: String) -> IO(String):
+  sys.read_file(path)
 
-def main() -> IO(Unit):
-  do IO<Unit>:
-    IO.print("==================================================")
-    IO.print("Bender Agent Primitives: Classify & Generate")
-    IO.print("==================================================")
-    IO.print("1. AGENT STATE:")
-    IO.print(agent_state())
-    IO.print("")
-    IO.print("2. RUNNING CLASSIFY (TypeSafe System One)...")
-    c_resp : String <- Classify(agent_state(), agent_questions())
-    IO.print("Classify Decision:")
-    IO.print(c_resp)
-    IO.print("")
-    IO.print("3. RUNNING GENERATE (OpenRouter / LLM)...")
-    g_resp : String <- Generate(
-      "deepseek/deepseek-v4-flash-0731:free",
-      "You are an expert systems programmer. Provide a concise 1-2 sentence solution to the reported compiler/linker error.",
-      "Fix this compiler error: undefined reference to symbol 'curl_easy_init'. Show the exact compiler command."
-    )
-    IO.print("Generate Output:")
-    IO.print(g_resp)
-    IO.print("==================================================")
+def WriteFile(path: String, content: String) -> IO(Unit):
+  sys.write_file(path, content)

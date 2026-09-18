@@ -4,3 +4,4 @@ call_typesafe_bin
 call_typesafe.c
 agent_primitives.c
 agent_primitives_bin
+bender_agent_bin

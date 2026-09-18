@@ -4,13 +4,56 @@ Bender is a new coding agent written in **Bend2**, supplemented with C for netwo
 
 ## Philosophy: Two Primitives (`Classify` & `Generate`)
 
-Rather than dozens of ad-hoc tools and fragile multi-turn conversational loops, Bender distills agent actions into two core primitives:
+Rather than dozens of ad-hoc tools, brittle parsers, and fragile conversational loops, Bender distills agent actions into two core primitives:
 1. **`Classify` (System 1 - Fast, Calibrated Decision Making)**:
    - Powered by **TypeSafe System One** (`jev-latest`).
-   - Evaluates state against typed questions (`Choice`, `Score`, `Noul`) to yield calibrated routing decisions and probabilities in a single batched HTTP call.
+   - Evaluates state against typed questions (`Choice`, `Score`, `Noul`) to yield calibrated routing decisions, confidence, and probabilities in a single batched HTTP call.
 2. **`Generate` (System 2 - Generative Synthesis)**:
    - Powered by **OpenRouter** (or any OpenAI-compatible provider like Gemini / Ollama).
-   - Produces code synthesis, diff generation, and explanations when `Classify` determines generation is required.
+   - Produces code synthesis, diff generation, and solutions when `Classify` determines generation is required.
+
+---
+
+## Autonomous Agent Loop & Terminal UI
+
+Bender runs an autonomous decision loop with a live terminal UI:
+```
+State -> Classify (TypeSafe) -> Calibrated Action -> Tool Execution -> State Update -> Verification
+```
+
+### Running the Autonomous Loop
+
+```bash
+./run_bender.sh
+```
+
+Example run session:
+```text
+================================================================================
+  🤖 [BENDER] Autonomous Coding Agent (Bend2 + TypeSafe + OpenRouter)
+================================================================================
+🎯 [GOAL] Initial Objective: Inspect repository, verify hello.bend, and confirm autonomous capabilities...
+
+--------------------------------------------------------------------------------
+📍 [STEP 1] Classifying State with TypeSafe System One (Jev)...
+--------------------------------------------------------------------------------
+🧠 [Classify Decision]: read_code (Confidence: 0.82, Probability: 0.87)
+📖 [TOOL READ] Reading 'hello.bend'...
+
+--------------------------------------------------------------------------------
+📍 [STEP 2] Classifying State with TypeSafe System One (Jev)...
+--------------------------------------------------------------------------------
+🧠 [Classify Decision]: run_build (Confidence: 0.98, Probability: 0.98)
+⚡ [TOOL EXEC] Running 'bend hello.bend'...
+   Output: Hello, world!
+
+--------------------------------------------------------------------------------
+📍 [STEP 3] Classifying State with TypeSafe System One (Jev)...
+--------------------------------------------------------------------------------
+🧠 [Classify Decision]: task_complete (Confidence: 0.73, Probability: 0.79)
+✅ [TASK COMPLETE] Bender confirmed all goals are verified and complete!
+================================================================================
+```
 
 ---
 
