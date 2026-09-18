@@ -20,7 +20,6 @@ law typesafe.post:
 
 def typesafe.post(payload):
   import "./typesafe_c.c"
-  import "./typesafe_c.js"
 
 # ------------------------------------------------------------------------------
 # Low-level FFI: OpenRouter / LLM Generation
@@ -30,7 +29,6 @@ law openrouter.post:
 
 def openrouter.post(payload):
   import "./openrouter_c.c"
-  import "./openrouter_c.js"
 
 # ------------------------------------------------------------------------------
 # Low-level FFI: Subprocess & File System Tools
@@ -40,21 +38,18 @@ law command.run:
 
 def command.run(cmd):
   import "./sys_c.c"
-  import "./sys_c.js"
 
 law sys.read_file:
   String -> IO(String)
 
 def sys.read_file(path):
   import "./sys_c.c"
-  import "./sys_c.js"
 
 law sys.write_file:
   String -> String -> IO(Unit)
 
 def sys.write_file(path, content):
   import "./sys_c.c"
-  import "./sys_c.js"
 
 # ------------------------------------------------------------------------------
 # JSON String escaping

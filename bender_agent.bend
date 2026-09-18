@@ -17,49 +17,42 @@ law typesafe.post:
 
 def typesafe.post(payload):
   import "./typesafe_c.c"
-  import "./typesafe_c.js"
 
 law openrouter.post:
   String -> IO(String)
 
 def openrouter.post(payload):
   import "./openrouter_c.c"
-  import "./openrouter_c.js"
 
 law command.run:
   String -> IO(String)
 
 def command.run(cmd):
   import "./sys_c.c"
-  import "./sys_c.js"
 
 law sys.read_file:
   String -> IO(String)
 
 def sys.read_file(path):
   import "./sys_c.c"
-  import "./sys_c.js"
 
 law sys.write_file:
   String -> String -> IO(Unit)
 
 def sys.write_file(path, content):
   import "./sys_c.c"
-  import "./sys_c.js"
 
 law extract.choice:
   String -> String -> IO(String)
 
 def extract.choice(json, qid):
   import "./json_parse_c.c"
-  import "./json_parse_c.js"
 
 law extract.generation:
   String -> IO(String)
 
 def extract.generation(json):
   import "./json_parse_c.c"
-  import "./json_parse_c.js"
 
 # ------------------------------------------------------------------------------
 # JSON String escaping
@@ -258,7 +251,7 @@ def handle_generate_fix(fuel: Nat, step_num: U32, state: String) -> IO(Unit):
   do IO<Unit>:
     u1 : Unit <- IO.print(color_magenta("[TOOL GENERATE] Calling LLM (OpenRouter) to generate code ..."))
     gen : String <- Generate(
-      "deepseek/deepseek-v4-flash-0731:free",
+      "openai/gpt-oss-120b:nitro",
       "You are Bender, an autonomous coding agent written in Bend2. Produce concise, direct code.",
       "State:\n" ++ state ++ "\nTask: Produce a minimal 1-line summary of how to run hello.bend"
     )

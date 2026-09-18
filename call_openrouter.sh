@@ -16,9 +16,10 @@ if [ -z "$KEY" ] || [ "$KEY" = "YOUR_OPENROUTER_API_KEY" ]; then
   exit 1
 fi
 
-MODEL="${OPENROUTER_MODEL:-deepseek/deepseek-v4-flash-0731:free}"
+MODEL="${OPENROUTER_MODEL:-openai/gpt-oss-120b:nitro}"
+BACKUP_MODEL="${OPENROUTER_BACKUP_MODEL:-deepseek/deepseek-v4-flash-0731:free}"
 
-echo "Sending request to OpenRouter ($MODEL)..."
+echo "Sending request to OpenRouter ($MODEL, backup: $BACKUP_MODEL)..."
 
 curl -s -X POST https://openrouter.ai/api/v1/chat/completions \
   -H "Authorization: Bearer $KEY" \
@@ -27,6 +28,7 @@ curl -s -X POST https://openrouter.ai/api/v1/chat/completions \
   -H "X-Title: Bender Agent" \
   -d "{
     \"model\": \"$MODEL\",
+    \"models\": [\"$MODEL\", \"$BACKUP_MODEL\"],
     \"messages\": [
       {\"role\": \"system\", \"content\": \"You are a succinct systems coding assistant.\"},
       {\"role\": \"user\", \"content\": \"Write a minimal 1-line hello world function in C.\"}

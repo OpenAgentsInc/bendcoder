@@ -138,14 +138,20 @@ static char* call_openrouter_generate(const char* prompt) {
   const char* key = get_api_key("OPENROUTER_API_KEY", ".env.openrouter", key_buf, sizeof(key_buf));
   if (!key) return strdup("{\"error\": \"Missing OpenRouter key\"}");
 
+  // OPENROUTER_MODEL and OPENROUTER_BACKUP_MODEL override the defaults.
+  const char* model = getenv("OPENROUTER_MODEL");
+  if (!model || !model[0]) model = "openai/gpt-oss-120b:nitro";
+  const char* backup = getenv("OPENROUTER_BACKUP_MODEL");
+  if (!backup || !backup[0]) backup = "deepseek/deepseek-v4-flash-0731:free";
+
   char tmp_payload[] = "/tmp/bender_or_XXXXXX";
   int fd = mkstemp(tmp_payload);
   if (fd < 0) return strdup("{}");
   FILE* pf = fdopen(fd, "w");
   if (pf) {
-    fprintf(pf, "{\"model\":\"deepseek/deepseek-v4-flash-0731:free\",\"messages\":["
+    fprintf(pf, "{\"model\":\"%s\",\"models\":[\"%s\",\"%s\"],\"messages\":["
       "{\"role\":\"system\",\"content\":\"You are Bender, an expert AI engineer and systems developer built in Bend2. Answer questions accurately and directly based on the context.\"},"
-      "{\"role\":\"user\",\"content\":");
+      "{\"role\":\"user\",\"content\":", model, model, backup);
     fputc('\"', pf);
     for (const char* p = prompt; *p; p++) {
       if (*p == '\"') fputs("\\\"", pf);
@@ -278,7 +284,7 @@ int main(int argc, char** argv) {
       char* ls_out = exec_cmd("ls -la");
       size_t cur_len = strlen(state);
       snprintf(state + cur_len, sizeof(state) - cur_len,
-        "\n[Repository Files]:\n%s\nNote: The project contains .bend, .c, and companion .js files (e.g. sys_c.js, openrouter_c.js, typesafe_c.js, json_parse_c.js). In Bend2, foreign defs provide companion .c and .js files so the program runs across both C/native and JavaScript/Bun backends.", ls_out);
+        "\n[Repository Files]:\n%s\nNote: The project contains .bend and .c files. In Bend2, a foreign def imports a .c file that builds into the native binary.", ls_out);
       free(ls_out);
     } else if (strcmp(decision, "run_build") == 0) {
       printf("⚡ %sRunning build check: 'bend hello.bend'...%s\n", ANSI_MAGENTA, ANSI_RESET);

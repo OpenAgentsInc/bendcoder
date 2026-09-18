@@ -5,7 +5,6 @@ law typesafe.post:
 
 def typesafe.post(payload):
   import "./typesafe_c.c"
-  import "./typesafe_c.js"
 
 def payload() -> String:
   "{\"state\":\"Help! My payouts have been failing for 3 days and I need this resolved urgently.\",\"model\":\"jev-latest\",\"questions\":{\"is_urgent\":{\"type\":\"noul\",\"instructions\":\"Does this message convey urgency or time-sensitivity?\"},\"department\":{\"type\":\"choice\",\"instructions\":\"Which department should handle this request?\",\"criteria\":{\"billing\":\"Payments, invoicing, refunds\",\"technical\":\"Bugs, outages, API errors\",\"sales\":\"Pricing, upgrades\"}}}}"

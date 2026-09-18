@@ -9,8 +9,35 @@ typedef struct {
   size_t len;
 } OpenRouterRespBuffer;
 
+// Model routing applied to every OpenRouter request. OpenRouter tries the
+// payload's "model" field first, then this "models" list in order.
+// OPENROUTER_MODEL and OPENROUTER_BACKUP_MODEL override the defaults.
+static const char* openrouter_model(void) {
+  const char* m = getenv("OPENROUTER_MODEL");
+  return (m && m[0]) ? m : "openai/gpt-oss-120b:nitro";
+}
+
+static const char* openrouter_backup_model(void) {
+  const char* m = getenv("OPENROUTER_BACKUP_MODEL");
+  return (m && m[0]) ? m : "deepseek/deepseek-v4-flash-0731:free";
+}
+
+// Insert a "models" fallback list after the payload's opening brace.
+static char* openrouter_payload_with_fallback(const char* payload) {
+  const char* primary = openrouter_model();
+  const char* backup = openrouter_backup_model();
+  if (!payload || payload[0] != '{') {
+    return strdup(payload ? payload : "{}");
+  }
+  size_t need = strlen(payload) + strlen(primary) + strlen(backup) + 32;
+  char* out = malloc(need);
+  if (!out) return strdup(payload);
+  snprintf(out, need, "{\"models\":[\"%s\",\"%s\"],%s", primary, backup,
+    payload + 1);
+  return out;
+}
+
 static void openrouter_call_worker(IoWork* w) {
-  // Read API key from environment variable OPENROUTER_API_KEY or .env.openrouter
   const char* env_var_name = "OPENROUTER_API_KEY";
   const char* env_key = getenv(env_var_name);
   char file_key[256] = {0};
@@ -51,13 +78,15 @@ static void openrouter_call_worker(IoWork* w) {
     w->size = strlen(w->data);
     return;
   }
+  char* payload = openrouter_payload_with_fallback(w->data);
   FILE* pf = fdopen(fd, "w");
   if (pf) {
-    fputs(w->data, pf);
+    fputs(payload, pf);
     fclose(pf);
   } else {
     close(fd);
   }
+  free(payload);
   free(w->data);
 
   // Use curl with the payload file
