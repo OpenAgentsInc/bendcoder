@@ -1,3 +1,5 @@
 .env.typesafe
 call_typesafe_bin
 call_typesafe.c
+agent_primitives.c
+agent_primitives_bin
