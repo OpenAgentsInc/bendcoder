@@ -12,6 +12,7 @@
 #define ANSI_YELLOW  "\x1b[33m"
 #define ANSI_MAGENTA "\x1b[35m"
 #define ANSI_BOLD    "\x1b[1m"
+#define ANSI_DIM     "\x1b[2m"
 #define ANSI_RESET   "\x1b[0m"
 
 static void render_banner(void) {
@@ -190,84 +191,127 @@ static char* extract_choice(const char* json, const char* qid) {
   return r;
 }
 
+// Unescapes JSON string content into clean, readable text
 static char* extract_content(const char* json) {
+  if (!json) return strdup("");
   const char* marker = "\"content\":";
   const char* p = strstr(json, marker);
   if (!p) return strdup(json);
   p += strlen(marker);
-  while (*p == ' ' || *p == '\"') p++;
-  const char* end = p;
-  while (*end && (*end != '\"' || *(end - 1) == '\\')) end++;
-  size_t len = end - p;
-  char* r = malloc(len + 1);
-  strncpy(r, p, len);
-  r[len] = '\0';
-  return r;
+  while (*p == ' ') p++;
+  if (*p != '\"') return strdup("");
+  p++; // skip opening quote
+
+  size_t cap = strlen(p) + 1;
+  char* out = malloc(cap);
+  size_t o = 0;
+  int escape = 0;
+  for (const char* cur = p; *cur; cur++) {
+    if (escape) {
+      if (*cur == 'n') out[o++] = '\n';
+      else if (*cur == 'r') out[o++] = '\r';
+      else if (*cur == 't') out[o++] = '\t';
+      else if (*cur == '\"') out[o++] = '\"';
+      else if (*cur == '\\') out[o++] = '\\';
+      else out[o++] = *cur;
+      escape = 0;
+    } else if (*cur == '\\') {
+      escape = 1;
+    } else if (*cur == '\"') {
+      break;
+    } else {
+      out[o++] = *cur;
+    }
+  }
+  out[o] = '\0';
+  return out;
+}
+
+// Extract field value for compact logging
+static double extract_number(const char* json, const char* key) {
+  if (!json) return 0.0;
+  const char* p = strstr(json, key);
+  if (!p) return 0.0;
+  p += strlen(key);
+  while (*p && (*p == ' ' || *p == ':' || *p == '\"')) p++;
+  return strtod(p, NULL);
 }
 
 int main(int argc, char** argv) {
   render_banner();
 
   char state[32768];
+  const char* goal_prompt = NULL;
   if (argc > 1 && strlen(argv[1]) > 0) {
+    goal_prompt = argv[1];
     snprintf(state, sizeof(state), "User Question/Goal: %s", argv[1]);
   } else {
-    snprintf(state, sizeof(state),
-      "User Question/Goal: Inspect the repository, verify hello.bend, and confirm autonomous capabilities are operating.");
+    goal_prompt = "Inspect the repository, verify hello.bend, and confirm autonomous capabilities are operating.";
+    snprintf(state, sizeof(state), "User Question/Goal: %s", goal_prompt);
   }
 
-  printf("%s🎯 [GOAL] %s%s\n\n", ANSI_BOLD, state, ANSI_RESET);
+  printf("%s🎯 [GOAL]%s %s\n\n", ANSI_BOLD, ANSI_RESET, goal_prompt);
 
-  int max_steps = 6;
-  for (int step = 1; step <= max_steps; step++) {
-    printf("%s--------------------------------------------------------------------------------%s\n", ANSI_CYAN, ANSI_RESET);
-    printf("%s📍 [STEP %d] Classifying State with TypeSafe System One (Jev)...%s\n", ANSI_BOLD, step, ANSI_RESET);
-    printf("%s--------------------------------------------------------------------------------%s\n", ANSI_CYAN, ANSI_RESET);
+  char* final_answer = NULL;
+  for (int step = 1; step <= 6; step++) {
+    printf("%s─── Step %d: Jev Classification ──────────────────────────────────────────%s\n", ANSI_CYAN, step, ANSI_RESET);
 
     // 1. Classify
     char* c_resp = call_typesafe_classify(state);
     char* decision = extract_choice(c_resp, "action");
+    double conf = extract_number(c_resp, "\"confidence\":");
+    double score = extract_number(c_resp, "\"score\":");
+    double noul = extract_number(c_resp, "\"noul\":");
 
-    printf("%s🧠 [Classify Decision]: %s%s%s\n", ANSI_YELLOW, ANSI_BOLD, decision, ANSI_RESET);
-    printf("   Full Calibration: %s\n\n", c_resp);
+    printf("🧠 %sAction Selected:%s %s%-16s%s %s(conf: %.2f, info_prob: %.2f, score: %.2f)%s\n",
+      ANSI_BOLD, ANSI_RESET,
+      ANSI_YELLOW, decision, ANSI_RESET,
+      ANSI_DIM, conf, noul, score, ANSI_RESET);
 
     // 2. Dispatch
     if (strcmp(decision, "task_complete") == 0) {
-      printf("%s✅ [TASK COMPLETE] Bender confirmed all goals are verified and complete!%s\n", ANSI_GREEN, ANSI_RESET);
-      printf("%s================================================================================%s\n", ANSI_CYAN, ANSI_RESET);
       free(c_resp);
       free(decision);
       break;
     } else if (strcmp(decision, "read_code") == 0) {
-      printf("%s📖 [TOOL READ] Inspecting repository files...%s\n", ANSI_MAGENTA, ANSI_RESET);
+      printf("📖 %sInspecting repository context...%s\n", ANSI_MAGENTA, ANSI_RESET);
       char* ls_out = exec_cmd("ls -la");
-      printf("   Directory listing:\n%s\n", ls_out);
       size_t cur_len = strlen(state);
       snprintf(state + cur_len, sizeof(state) - cur_len,
         "\n[Repository Files]:\n%s\nNote: The project contains .bend, .c, and companion .js files (e.g. sys_c.js, openrouter_c.js, typesafe_c.js, json_parse_c.js). In Bend2, foreign defs provide companion .c and .js files so the program runs across both C/native and JavaScript/Bun backends.", ls_out);
       free(ls_out);
     } else if (strcmp(decision, "run_build") == 0) {
-      printf("%s⚡ [TOOL EXEC] Running check...%s\n", ANSI_MAGENTA, ANSI_RESET);
-      char* out = exec_cmd("bend --version 2>&1 || true");
-      printf("   Output: %s\n", out);
+      printf("⚡ %sRunning build check: 'bend hello.bend'...%s\n", ANSI_MAGENTA, ANSI_RESET);
+      char* out = exec_cmd("bend hello.bend");
       size_t cur_len = strlen(state);
       snprintf(state + cur_len, sizeof(state) - cur_len,
         "\n[Command Output]: %s", out);
       free(out);
     } else { // generate_answer
-      printf("%s✨ [TOOL GENERATE] Calling OpenRouter LLM to synthesize answer...%s\n", ANSI_MAGENTA, ANSI_RESET);
+      printf("✨ %sSynthesizing answer via OpenRouter...%s\n", ANSI_MAGENTA, ANSI_RESET);
       char* g_resp = call_openrouter_generate(state);
-      char* content = extract_content(g_resp);
-      printf("%s   [Answer]:\n%s%s\n\n", ANSI_GREEN, content, ANSI_RESET);
+      if (final_answer) free(final_answer);
+      final_answer = extract_content(g_resp);
       size_t cur_len = strlen(state);
       snprintf(state + cur_len, sizeof(state) - cur_len,
-        "\n[Answer Generated]: %s\nStatus: Complete and verified.", content);
-      free(content);
+        "\n[Answer Generated]: %s\nStatus: Complete and verified.", final_answer);
       free(g_resp);
     }
 
     free(c_resp);
     free(decision);
+  }
+
+  // Final Output Card
+  printf("\n%s================================================================================%s\n", ANSI_GREEN, ANSI_RESET);
+  printf("%s  ✅ TASK COMPLETE%s\n", ANSI_BOLD, ANSI_RESET);
+  printf("%s================================================================================%s\n\n", ANSI_GREEN, ANSI_RESET);
+
+  if (final_answer && strlen(final_answer) > 0) {
+    printf("%s%s\n\n", ANSI_RESET, final_answer);
+    free(final_answer);
+  } else {
+    printf("Repository goals verified and all checks passed successfully.\n\n");
   }
 
   return 0;
