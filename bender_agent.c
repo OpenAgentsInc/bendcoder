@@ -536,7 +536,10 @@ static int path_is_in_repo(const char* path) {
 
 // The model answers with sentinel-delimited sections rather than JSON: an edit
 // carries exact source text, and sentinels survive quotes, braces and newlines
-// that a JSON string would have to escape (and routinely escapes wrongly).
+// that a JSON string would have to escape (and routinely escapes wrongly). A
+// change spanning files — or several spots in one — repeats the
+// PATH/OLD/NEW group once per hunk before the single <<<END>>>; parsing each
+// group is what lets one apply_edit carry a multi-file change.
 #define EDIT_FORMAT_SYSTEM \
   "You are Bender, an autonomous coding agent improving your own repository.\n" \
   "Reply with EXACTLY this form and nothing else — no prose, no code fences:\n" \
@@ -547,28 +550,110 @@ static int path_is_in_repo(const char* path) {
   "<<<NEW>>>\n" \
   "the replacement text\n" \
   "<<<END>>>\n" \
-  "The OLD block must appear EXACTLY ONCE in the file: include enough " \
-  "surrounding lines to make it unique. Leave the OLD block empty only when " \
+  "When the change spans files or touches several spots in one, repeat the " \
+  "<<<PATH>>>/<<<OLD>>>/<<<NEW>>> group once per hunk and put <<<END>>> only " \
+  "after the last one — the hunks are applied and verified as a unit. Each " \
+  "OLD block must appear EXACTLY ONCE in its file: include enough " \
+  "surrounding lines to make it unique. Leave an OLD block empty only when " \
   "creating a new file. Make one small, self-contained change."
 
-// Returns the text between `open` and the next sentinel, or NULL when the
-// section is absent. The caller frees.
-static char* slice_section(const char* text, const char* open, const char* close) {
-  const char* start = strstr(text, open);
-  if (!start) return NULL;
-  start += strlen(open);
+// The text of one section: from just after its opening sentinel to just
+// before the next one. The newline after the opener and the one before the
+// closer belong to the delimiters, not to the content they bracket.
+static char* slice_range(const char* start, const char* end) {
   if (*start == '\n') start++;
-  const char* end = strstr(start, close);
-  if (!end) return NULL;
   size_t len = (size_t)(end - start);
-  // The newline before the closing sentinel belongs to the delimiter, not to
-  // the content it terminates.
   if (len > 0 && start[len - 1] == '\n') len--;
   char* out = malloc(len + 1);
   if (!out) return NULL;
   memcpy(out, start, len);
   out[len] = '\0';
   return out;
+}
+
+// Returns the text between `open` and the next `close`, or NULL when the
+// section is absent. The caller frees.
+static char* slice_section(const char* text, const char* open, const char* close) {
+  const char* start = strstr(text, open);
+  if (!start) return NULL;
+  start += strlen(open);
+  const char* end = strstr(start, close);
+  if (!end) return NULL;
+  return slice_range(start, end);
+}
+
+// One <<<PATH>>>/<<<OLD>>>/<<<NEW>>> group of an edit block.
+typedef struct {
+  char* path;
+  char* old_str;
+  char* new_str;
+} EditHunk;
+
+static void free_edit_hunks(EditHunk* hunks, int n) {
+  if (!hunks) return;
+  for (int i = 0; i < n; i++) {
+    free(hunks[i].path);
+    free(hunks[i].old_str);
+    free(hunks[i].new_str);
+  }
+  free(hunks);
+}
+
+// The earlier of two sentinels at or after `from`; NULL only when both are.
+static const char* first_of(const char* from, const char* a, const char* b) {
+  const char* pa = strstr(from, a);
+  const char* pb = strstr(from, b);
+  if (!pa) return pb;
+  if (!pb) return pa;
+  return pa < pb ? pa : pb;
+}
+
+// Parses every <<<PATH>>>/<<<OLD>>>/<<<NEW>>> group before <<<END>>> into a
+// malloc'd array (free with free_edit_hunks). Returns the hunk count, or -1
+// when the block is malformed — no groups, or a group with a sentinel missing
+// or out of order. The first <<<END>>> ends the reply: anything a model
+// appends after it is ignored rather than parsed as more hunks.
+static int parse_edit_hunks(const char* block, EditHunk** out) {
+  *out = NULL;
+  if (!block) return -1;
+  const char* reply_end = strstr(block, "<<<END>>>");
+  int cap = 0;
+  for (const char* p = block;
+       (p = strstr(p, "<<<PATH>>>")) != NULL && (!reply_end || p < reply_end);
+       p += strlen("<<<PATH>>>")) {
+    cap++;
+  }
+  if (cap == 0) return -1;
+  EditHunk* hunks = calloc((size_t)cap, sizeof(EditHunk));
+  if (!hunks) return -1;
+
+  int n = 0;
+  const char* cur = block;
+  while (n < cap) {
+    const char* p = strstr(cur, "<<<PATH>>>");
+    const char* o = p ? strstr(p + strlen("<<<PATH>>>"), "<<<OLD>>>") : NULL;
+    const char* nxt = p ? strstr(p + strlen("<<<PATH>>>"), "<<<PATH>>>") : NULL;
+    // Each sentinel must belong to this group — before the next group opens —
+    // or the block is malformed rather than merely unusual.
+    const char* nw = (o && (!nxt || o < nxt))
+      ? strstr(o + strlen("<<<OLD>>>"), "<<<NEW>>>") : NULL;
+    const char* end = (nw && (!nxt || nw < nxt))
+      ? first_of(nw + strlen("<<<NEW>>>"), "<<<PATH>>>", "<<<END>>>") : NULL;
+    if (!end) break;
+    hunks[n].path = slice_range(p + strlen("<<<PATH>>>"), o);
+    hunks[n].old_str = slice_range(o + strlen("<<<OLD>>>"), nw);
+    hunks[n].new_str = slice_range(nw + strlen("<<<NEW>>>"), end);
+    if (!hunks[n].path || !hunks[n].old_str || !hunks[n].new_str) break;
+    n++;
+    if (end == reply_end) break;
+    cur = end;
+  }
+  if (n < cap) {
+    free_edit_hunks(hunks, n);
+    return -1;
+  }
+  *out = hunks;
+  return n;
 }
 
 static void trim_inplace(char* s) {
@@ -820,9 +905,57 @@ static void do_read_code(char* state, size_t cap, const char* goal, int read_pha
   free(path);
 }
 
-// apply_edit: draft one edit, apply it with the Edit tool, verify, and roll the
-// file back when verification fails. The rollback is what lets the loop keep
-// running after a bad patch instead of leaving the repo broken.
+// One file an edit batch is about to touch, snapshotted so the whole batch
+// can be undone as a unit. Each distinct path is captured once, before its
+// first hunk lands — a second hunk on the same file must not re-snapshot the
+// already-edited content.
+typedef struct {
+  char* path;
+  char* data;   // pre-edit contents; NULL when the file did not exist
+  size_t len;
+} FileSnapshot;
+
+// Returns the snapshot for `path`, taking it on first sight. `snaps` must
+// have room for one entry per hunk; NULL means out of memory.
+static FileSnapshot* snapshot_for(FileSnapshot* snaps, int* n, const char* path) {
+  for (int i = 0; i < *n; i++) {
+    if (strcmp(snaps[i].path, path) == 0) return &snaps[i];
+  }
+  FileSnapshot* s = &snaps[(*n)++];
+  s->path = strdup(path);
+  s->data = bender_slurp(path, &s->len);
+  if (!s->path) { (*n)--; return NULL; }
+  return s;
+}
+
+// Restores every snapshotted file: one the batch changed gets its old
+// contents back, and one it created is removed — rollback of the unit, not
+// of whichever hunk happened to fail.
+static void snapshots_restore(FileSnapshot* snaps, int n) {
+  for (int i = 0; i < n; i++) {
+    if (snaps[i].data) {
+      char* r = tool_write(snaps[i].path, snaps[i].data, snaps[i].len);
+      free(r);
+    } else {
+      unlink(snaps[i].path);
+    }
+  }
+}
+
+static void snapshots_free(FileSnapshot* snaps, int n) {
+  for (int i = 0; i < n; i++) {
+    free(snaps[i].path);
+    free(snaps[i].data);
+  }
+  free(snaps);
+}
+
+// apply_edit: draft an edit — one or more PATH/OLD/NEW hunks — apply it with
+// the Edit tool, verify, and roll every touched file back when verification
+// fails. A change spanning files arrives as several hunks in one reply and is
+// applied as a unit: a mid-batch failure or a failed verify restores all of
+// it, which is what lets the loop keep running after a bad patch instead of
+// leaving the repo half-changed.
 static void do_apply_edit(char* state, size_t cap, const char* goal) {
   printf("🛠  %sDrafting an edit via OpenRouter...%s\n", ANSI_MAGENTA, ANSI_RESET);
 
@@ -832,60 +965,78 @@ static void do_apply_edit(char* state, size_t cap, const char* goal) {
   char* block = extract_content(resp);
   free(resp);
 
-  char* path = slice_section(block, "<<<PATH>>>", "<<<OLD>>>");
-  char* old_str = slice_section(block, "<<<OLD>>>", "<<<NEW>>>");
-  char* new_str = slice_section(block, "<<<NEW>>>", "<<<END>>>");
+  EditHunk* hunks = NULL;
+  int hunk_n = parse_edit_hunks(block, &hunks);
   free(block);
 
-  if (!path || !old_str || !new_str) {
+  if (hunk_n <= 0) {
     printf("⚠️  %sThe model did not return a well-formed edit block.%s\n", ANSI_YELLOW, ANSI_RESET);
     state_append(state, cap, "Edit failed",
       "The generated edit was not in the required <<<PATH>>>/<<<OLD>>>/<<<NEW>>>/<<<END>>> form.");
-    free(path); free(old_str); free(new_str);
-    return;
-  }
-  trim_inplace(path);
-
-  if (!path_is_in_repo(path)) {
-    printf("🚫 %sRefusing to edit outside the repository: '%s'%s\n", ANSI_YELLOW, path, ANSI_RESET);
-    state_append(state, cap, "Edit refused", "The requested path is outside the repository.");
-    free(path); free(old_str); free(new_str);
+    free_edit_hunks(hunks, 0);
     return;
   }
 
-  // An edit to a file the agent has not read is a guess. ~/coder's Edit refuses
-  // it for the same reason ("File has not been read yet"), and the loop needs
-  // the refusal more, because nothing else stops it inventing plausible text
-  // and proposing it over and over.
-  if (bender_exists(path) && !read_cursor_find(path)) {
-    printf("🚫 %s'%s' has not been read yet; refusing to edit it blind.%s\n",
-           ANSI_YELLOW, path, ANSI_RESET);
-    char note[512];
-    snprintf(note, sizeof(note),
-      "%s has not been read yet, so the edit was refused. Read it first, then "
-      "quote its text exactly.", path);
-    state_append(state, cap, "Edit refused", note);
-    snprintf(pending_read, sizeof(pending_read), "%s", path);
-    free(path); free(old_str); free(new_str);
-    return;
+  // Every hunk is checked before any file is touched, so a refused hunk
+  // cannot leave the earlier ones applied.
+  for (int i = 0; i < hunk_n; i++) {
+    EditHunk* h = &hunks[i];
+    trim_inplace(h->path);
+    if (!path_is_in_repo(h->path)) {
+      printf("🚫 %sRefusing to edit outside the repository: '%s'%s\n",
+             ANSI_YELLOW, h->path, ANSI_RESET);
+      state_append(state, cap, "Edit refused", "The requested path is outside the repository.");
+      free_edit_hunks(hunks, hunk_n);
+      return;
+    }
+    // An edit to a file the agent has not read is a guess. ~/coder's Edit
+    // refuses it for the same reason ("File has not been read yet"), and the
+    // loop needs the refusal more, because nothing else stops it inventing
+    // plausible text and proposing it over and over.
+    if (bender_exists(h->path) && !read_cursor_find(h->path)) {
+      printf("🚫 %s'%s' has not been read yet; refusing to edit it blind.%s\n",
+             ANSI_YELLOW, h->path, ANSI_RESET);
+      char note[512];
+      snprintf(note, sizeof(note),
+        "%s has not been read yet, so the edit was refused. Read it first, then "
+        "quote its text exactly.", h->path);
+      state_append(state, cap, "Edit refused", note);
+      snprintf(pending_read, sizeof(pending_read), "%s", h->path);
+      free_edit_hunks(hunks, hunk_n);
+      return;
+    }
   }
 
-  // Snapshot before touching the file: verification decides whether it stays.
-  size_t backup_len = 0;
-  char* backup = bender_slurp(path, &backup_len);
-
-  printf("✏️  %sEditing '%s'...%s\n", ANSI_MAGENTA, path, ANSI_RESET);
-  char* result = tool_edit(path, old_str, new_str, 0);
-  printf("   %s\n", result);
-  state_append(state, cap, "Edit result", result);
-  int applied = strncmp(result, "error:", 6) != 0;
-  free(result);
-  free(old_str);
-  free(new_str);
+  FileSnapshot* snaps = calloc((size_t)hunk_n, sizeof(FileSnapshot));
+  if (!snaps) {
+    free_edit_hunks(hunks, hunk_n);
+    return;
+  }
+  int snap_n = 0;
+  int applied = 1;
+  for (int i = 0; i < hunk_n; i++) {
+    EditHunk* h = &hunks[i];
+    if (!snapshot_for(snaps, &snap_n, h->path)) { applied = 0; break; }
+    printf("✏️  %sEditing '%s'...%s\n", ANSI_MAGENTA, h->path, ANSI_RESET);
+    char* result = tool_edit(h->path, h->old_str, h->new_str, 0);
+    printf("   %s\n", result);
+    char label[320];
+    snprintf(label, sizeof(label), "Edit result (%s)", h->path);
+    state_append(state, cap, label, result);
+    if (strncmp(result, "error:", 6) == 0) {
+      applied = 0;
+      free(result);
+      break;
+    }
+    free(result);
+  }
 
   if (!applied) {
-    free(backup);
-    free(path);
+    printf("↩️  %sRolling back the %d file(s) this edit touched.%s\n",
+           ANSI_YELLOW, snap_n, ANSI_RESET);
+    snapshots_restore(snaps, snap_n);
+    snapshots_free(snaps, snap_n);
+    free_edit_hunks(hunks, hunk_n);
     return;
   }
 
@@ -896,17 +1047,14 @@ static void do_apply_edit(char* state, size_t cap, const char* goal) {
     printf("✅ %sVerification passed.%s\n", ANSI_GREEN, ANSI_RESET);
     state_append(state, cap, "Verification passed", out);
   } else {
-    printf("❌ %sVerification failed (exit %d) — rolling the file back.%s\n",
+    printf("❌ %sVerification failed (exit %d) — rolling the edits back.%s\n",
            ANSI_YELLOW, status, ANSI_RESET);
-    if (backup) {
-      char* restore = tool_write(path, backup, backup_len);
-      free(restore);
-    }
-    state_append(state, cap, "Verification failed; edit rolled back", out);
+    snapshots_restore(snaps, snap_n);
+    state_append(state, cap, "Verification failed; edits rolled back", out);
   }
   free(out);
-  free(backup);
-  free(path);
+  snapshots_free(snaps, snap_n);
+  free_edit_hunks(hunks, hunk_n);
 }
 
 int main(int argc, char** argv) {

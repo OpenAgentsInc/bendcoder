@@ -48,6 +48,43 @@ int main(void) {
   check(empty && empty[0] == '\0', "empty OLD section parses as empty string");
   free(empty);
 
+  // An edit may carry several hunks — one PATH/OLD/NEW group per file or per
+  // spot — before the single <<<END>>>; they are parsed and applied as a unit.
+  const char* multi =
+    "<<<PATH>>>\nsys_c.c\n<<<OLD>>>\nint a = 1;\n<<<NEW>>>\nint a = 2;\n"
+    "<<<PATH>>>\nagent_primitives.bend\n<<<OLD>>>\nold\n  kept\n<<<NEW>>>\nnew\n<<<END>>>\n";
+  EditHunk* hs = NULL;
+  int hn = parse_edit_hunks(multi, &hs);
+  check(hn == 2, "a two-hunk block parses both hunks");
+  check(hs && hn == 2 && strcmp(hs[0].path, "sys_c.c") == 0 &&
+        strcmp(hs[0].old_str, "int a = 1;") == 0 && strcmp(hs[0].new_str, "int a = 2;") == 0,
+        "the first hunk keeps its own fields");
+  check(hs && hn == 2 && strcmp(hs[1].path, "agent_primitives.bend") == 0 &&
+        strcmp(hs[1].old_str, "old\n  kept") == 0 && strcmp(hs[1].new_str, "new") == 0,
+        "the second group is not folded into the first NEW");
+  free_edit_hunks(hs, hn);
+
+  // The common one-hunk reply still parses, and <<<END>>> ends it — anything
+  // after is ignored, so a model's trailing note cannot become a hunk.
+  EditHunk* one = NULL;
+  int on = parse_edit_hunks(
+    "<<<PATH>>>\nsrc/a.c\n<<<OLD>>>\nint x = 1;\n<<<NEW>>>\nint x = 42;\n"
+    "<<<END>>>\n<<<PATH>>>\nstray.c\n<<<OLD>>>\nz\n<<<NEW>>>\nw\n", &one);
+  check(on == 1 && one && strcmp(one[0].new_str, "int x = 42;") == 0,
+        "a single-hunk block parses and ignores text after <<<END>>>");
+  free_edit_hunks(one, on);
+
+  EditHunk* bad = NULL;
+  check(parse_edit_hunks("<<<PATH>>>\nx.c\n<<<OLD>>>\na\n", &bad) == -1,
+        "a group missing <<<NEW>>> is malformed");
+  check(parse_edit_hunks("<<<PATH>>>\nx.c\n<<<OLD>>>\na\n<<<NEW>>>\nb\n", &bad) == -1,
+        "a group missing <<<END>>> is malformed");
+  check(parse_edit_hunks("no sentinels at all", &bad) == -1,
+        "a reply with no group is malformed");
+  check(parse_edit_hunks("<<<PATH>>>\nx.c\n<<<PATH>>>\ny.c\n<<<OLD>>>\na\n<<<NEW>>>\nb\n<<<END>>>\n",
+                         &bad) == -1,
+        "a group missing <<<OLD>>> is malformed");
+
   // The picker's reply routinely carries the model's reasoning; a path must
   // still be recovered from it, and refused when there is none.
   char* p1 = extract_existing_path("tools_c.h");
@@ -221,6 +258,33 @@ int main(void) {
   char* r3 = tool_read(tmp, 4, 1);
   check(r3 && strcmp(r3, "4\tNINE") == 0, "the literal line was replaced, not a stripped one");
   free(r3);
+
+  // Rollback covers the set of files a batch touches: each path is snapshotted
+  // once before its first hunk, changed files are restored, and a file the
+  // batch created is removed — the unit, not whichever hunk failed.
+  char* sf1 = scratch_path("snap/a.txt");
+  char* sf2 = scratch_path("snap/b.txt");
+  char* sw = tool_write(sf1, "before\n", 7);
+  free(sw);
+  FileSnapshot* sn = calloc(2, sizeof(FileSnapshot));
+  int sn_n = 0;
+  check(snapshot_for(sn, &sn_n, sf1) != NULL && sn_n == 1, "snapshot taken for a touched file");
+  check(snapshot_for(sn, &sn_n, sf1) == &sn[0] && sn_n == 1,
+        "a second hunk on one file does not re-snapshot");
+  check(snapshot_for(sn, &sn_n, sf2) != NULL && sn_n == 2 && sn[1].data == NULL,
+        "a not-yet-existing file snapshots as absent");
+  char* m1 = tool_edit(sf1, "before", "after", 0);
+  free(m1);
+  char* m2 = tool_write(sf2, "created\n", 8);
+  free(m2);
+  snapshots_restore(sn, sn_n);
+  char* back = bender_slurp(sf1, NULL);
+  check(back && strcmp(back, "before\n") == 0, "a changed file is restored on rollback");
+  check(!bender_exists(sf2), "a file the batch created is removed on rollback");
+  free(back);
+  snapshots_free(sn, sn_n);
+  free(sf1);
+  free(sf2);
 
   // ----------------------------------------------------------------------
   // Grep: test pattern matching, non‑matching, and directory handling.
