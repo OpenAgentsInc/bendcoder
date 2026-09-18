@@ -212,10 +212,62 @@ int main(void) {
   //   TWO
   //   three
   //   9    NINE
-  // Grep for a line that exists.
+  // Grep for a line that exists. Hits now carry their context lines, marked
+  // '-' the way grep -C marks them, so a match lands in the state with the
+  // code around it — a bare "N:line" left the model to invent what contained
+  // the match.
   char* g1 = tool_grep("TWO", tmp);
-  check(g1 && strcmp(g1, "2:TWO") == 0, "tool_grep matches pattern");
+  check(g1 && strcmp(g1, "1-one\n2:TWO\n3-three\n4-NINE") == 0,
+        "tool_grep matches pattern, with context lines around it");
   free(g1);
+
+  // Blocks that do not touch are separated the way grep separates them.
+  const char* far_text = "aa hit bb\nx\nx\nx\nx\nx\nx\nx\nx\nzz hit yy\n";
+  char* w_far = tool_write(scratch_path("far.txt"), far_text, strlen(far_text));
+  free(w_far);
+  char* g_gap = tool_grep("hit", scratch_path("far.txt"));
+  check(g_gap && strstr(g_gap, "1:aa hit bb") != NULL &&
+        strstr(g_gap, "\n--\n") != NULL && strstr(g_gap, "10:zz hit yy") != NULL,
+        "tool_grep separates distant match blocks with --");
+  free(g_gap);
+
+  // A miss retries case-insensitively and says so when that finds something.
+  const char* ci_text = "foo\nBender_MAX\nbar\n";
+  char* w_ci = tool_write(scratch_path("ci.txt"), ci_text, strlen(ci_text));
+  free(w_ci);
+  char* g_ci = tool_grep("BENDER_MAX", scratch_path("ci.txt"));
+  check(g_ci && strstr(g_ci, "No matches found") != NULL &&
+        strstr(g_ci, "case-insensitive") != NULL &&
+        strstr(g_ci, "2:Bender_MAX") != NULL,
+        "a case-only miss retries case-insensitively and reports it");
+  free(g_ci);
+
+  // A complete miss reports the longest pieces of the pattern that do appear,
+  // so the next guess starts from something real instead of another shot in
+  // the dark — the failure this exists to prevent was six identical misses.
+  const char* const_text = "#define BENDER_GREP_MAX_MATCHES 200\n";
+  char* w_const = tool_write(scratch_path("const.h"), const_text, strlen(const_text));
+  free(w_const);
+  char* g_frag = tool_grep("MAX_GREP_MATCHES", scratch_path("const.h"));
+  check(g_frag && strstr(g_frag, "No matches found") != NULL &&
+        strstr(g_frag, "'MAX_'") != NULL && strstr(g_frag, "'_MATCHES'") != NULL,
+        "a miss names the longest pieces of the pattern that do appear");
+  free(g_frag);
+
+  // Over a tree the same hint names the files a piece lives in. The pattern
+  // is concatenated here so this file does not contain it literally.
+  char* g_tree = tool_grep("QQMAX_" "MATCHES", ".");
+  check(g_tree && strstr(g_tree, "No matches found") != NULL &&
+        strstr(g_tree, "'MAX_MATCHES'") != NULL && strstr(g_tree, "tools_c.h") != NULL,
+        "a tree miss names the files holding a matching piece");
+  free(g_tree);
+
+  // When no piece long enough to mean anything appears, the miss stays plain.
+  char* g_plain = tool_grep("q9z8w7", tmp);
+  check(g_plain && strstr(g_plain, "No matches found") != NULL &&
+        strstr(g_plain, "Pieces") == NULL,
+        "a miss with no real pieces stays a plain message");
+  free(g_plain);
 
   // Grep for a pattern that does not exist.
   char* g2 = tool_grep("absent", tmp);
@@ -235,7 +287,11 @@ int main(void) {
   char* g_tracked = tool_grep("BENDER_GREP_MAX_MATCHES", ".");
   check(g_tracked && strstr(g_tracked, "tools_c.h:") != NULL,
         "a tree search finds tracked source");
-  check(g_tracked && strstr(g_tracked, "agent_primitives.c:") == NULL,
+  // A hit in an untracked file would label lines with its path; the name can
+  // still occur inside another file's context lines (it does — this very
+  // check), so the assertion looks at the label position, not the substring.
+  check(g_tracked && strncmp(g_tracked, "agent_primitives.c", 18) != 0 &&
+        strstr(g_tracked, "\nagent_primitives.c") == NULL,
         "a tree search skips generated, untracked files");
   free(g_tracked);
   // The tracked filter is about this repository; an absolute path is somewhere

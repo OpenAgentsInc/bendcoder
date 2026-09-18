@@ -216,6 +216,9 @@ def EditFileAll(path: String, old_str: String, new_str: String) -> IO(String):
   sys.edit_file(path, old_str, new_str, "true")
 
 # Grep: literal search. A file yields "N:line"; a directory is searched
-# recursively and yields "path:N:line", so a hit can be handed to Read or Edit.
+# recursively and yields "path:N:line", so a hit can be handed to Read or
+# Edit. Hits carry context lines marked "N-line" / "path-N-line", and a miss
+# retries case-insensitively before reporting which pieces of the pattern do
+# appear and where.
 def Grep(pattern: String, path: String) -> IO(String):
   sys.grep_file(pattern, path)
