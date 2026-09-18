@@ -16,7 +16,7 @@ if [ -z "$KEY" ] || [ "$KEY" = "YOUR_OPENROUTER_API_KEY" ]; then
   exit 1
 fi
 
-MODEL="${OPENROUTER_MODEL:-meta-llama/llama-3.3-70b-instruct:free}"
+MODEL="${OPENROUTER_MODEL:-deepseek/deepseek-v4-flash-0731:free}"
 
 echo "Sending request to OpenRouter ($MODEL)..."
 

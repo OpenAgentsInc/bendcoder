@@ -190,7 +190,7 @@ def main() -> IO(Unit):
     IO.print("")
     IO.print("3. RUNNING GENERATE (OpenRouter / LLM)...")
     g_resp : String <- Generate(
-      "google/gemma-4-26b-a4b-it:free",
+      "deepseek/deepseek-v4-flash-0731:free",
       "You are an expert systems programmer. Provide a concise 1-2 sentence solution to the reported compiler/linker error.",
       "Fix this compiler error: undefined reference to symbol 'curl_easy_init'. Show the exact compiler command."
     )
