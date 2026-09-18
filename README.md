@@ -78,12 +78,17 @@ Classify -> Generate an edit -> Edit applies it -> verify -> pass? keep : roll b
 - **Generate an edit.** The model replies in a sentinel-delimited form
   (`<<<PATH>>>` / `<<<OLD>>>` / `<<<NEW>>>` / `<<<END>>>`) rather than JSON,
   because an edit carries exact source text and sentinels survive the quotes,
-  braces and newlines a JSON string has to escape.
+  braces and newlines a JSON string has to escape. A change spanning files —
+  or several spots in one — repeats the `<<<PATH>>>`/`<<<OLD>>>`/`<<<NEW>>>`
+  group once per hunk before the single `<<<END>>>`, and the hunks are
+  applied and verified as a unit.
 - **Verify.** `./run_tests.sh` by default; set `BENDER_VERIFY_CMD` to point the
   loop at a different suite.
-- **Roll back.** The file is snapshotted before the edit and restored when
-  verification fails, so a bad patch never leaves the tree broken — the failure
-  goes back into the state and the next `Classify` round sees it.
+- **Roll back.** Every file the edit touches is snapshotted before its first
+  hunk lands, and all are restored when verification fails or a mid-batch
+  hunk does — a file the batch created is removed — so a bad patch never
+  leaves the tree broken. The failure goes back into the state and the next
+  `Classify` round sees it.
 - **Stay in the repo.** Absolute paths and anything containing `..` are refused
   before they reach the tools.
 
