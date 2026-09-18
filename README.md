@@ -83,7 +83,12 @@ Classify -> Generate an edit -> Edit applies it -> verify -> pass? keep : roll b
   group once per hunk before the single `<<<END>>>`, and the hunks are
   applied and verified as a unit.
 - **Verify.** `./run_tests.sh` by default; set `BENDER_VERIFY_CMD` to point the
-  loop at a different suite.
+  loop at a different suite. The suite ends by printing a `COVERED: <path>`
+  line for every file it exercises; a pass over a file absent from that list is
+  reported as "verification passed, but nothing in the suite exercises it",
+  not as a clean pass — a green run only says something about the files the
+  suite actually reads. A custom verify command can print the same lines to
+  take part.
 - **Roll back.** Every file the edit touches is snapshotted before its first
   hunk lands, and all are restored when verification fails or a mid-batch
   hunk does — a file the batch created is removed — so a bad patch never
@@ -115,10 +120,15 @@ BENDER_MAX_STEPS=8 ./run_bender.sh "Add a greet_bender function to hello.bend, k
 ```
 
 Covers the file tools, the agent's edit-block parser and path guard, and checks
-that the C runtime compiles and both Bend programs still check and build. The
-path guard is also a proof gate: `LAWS.bend` ports `path_is_in_repo` and states
-its refusal rules over every input, and `PROOF.bend` must fill each one for the
-suite to pass. This is also the loop's default verification target.
+that the C runtime compiles and both Bend programs still check and build —
+with warnings as errors on the repository's own C and on every section of the
+FFI shims, a `bash -n` over the scripts, a structural check on the markdown
+(fences balanced, no section break splitting an introduction from its block),
+and `call_typesafe.bend` compiled. The path guard is also a proof gate:
+`guard.bend` ports `path_is_in_repo`, `LAWS.bend` states its refusal rules over
+every input, and `PROOF.bend` must fill each one for the suite to pass. This is
+also the loop's default verification target, and it reports what it covered;
+see the `COVERED:` note under Verify above.
 
 ## Two agents
 
@@ -242,7 +252,7 @@ a failed request — which every consumer matches on.
 
 ## API Keys & Configuration
 
-Both keys are git-ignored and can be set in files or environment variables:
+Both keys are git-ignored and can be set in files or environment variables.
 
 ### 1. TypeSafe System One (for `Classify`)
 - **File:** `.env.typesafe` (template: `.env.typesafe.example`)

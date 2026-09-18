@@ -514,11 +514,26 @@ static void state_append(char* state, size_t cap, const char* label, const char*
 
 // The command that decides whether an edit was good. run_tests.sh covers the
 // file tools, the agent's helpers and the Bend side; BENDER_VERIFY_CMD points
-// the loop at a different suite when a goal calls for one.
+// the loop at a different suite when a goal calls for one. A suite that ends
+// its output with one "COVERED: <path>" line per file it exercises lets
+// apply_edit tell a real pass from a green run that read nothing relevant.
 static const char* verify_command(void) {
   const char* cmd = getenv("BENDER_VERIFY_CMD");
   if (cmd && cmd[0]) return cmd;
   return "./run_tests.sh";
+}
+
+// Whether the verify output's coverage manifest names `path`: 1 when it does,
+// 0 when a manifest is present but does not, -1 when the output carries no
+// manifest at all. A pass is only evidence about the files the suite reads —
+// run_tests.sh emits the manifest precisely so an edit landing outside it is
+// reported as the weaker thing it is rather than as verification. See #22.
+static int suite_covers(const char* verify_out, const char* path) {
+  if (!verify_out || !strstr(verify_out, "COVERED: ")) return -1;
+  while (path[0] == '.' && path[1] == '/') path += 2;
+  char needle[512];
+  snprintf(needle, sizeof(needle), "COVERED: %s\n", path);
+  return strstr(verify_out, needle) != NULL;
 }
 
 // An agent editing its own repository must not wander out of it. Paths are
@@ -568,16 +583,6 @@ static char* slice_range(const char* start, const char* end) {
   return out;
 }
 
-// Returns the text between `open` and the next `close`, or NULL when the
-// section is absent. The caller frees.
-static char* slice_section(const char* text, const char* open, const char* close) {
-  const char* start = strstr(text, open);
-  if (!start) return NULL;
-  start += strlen(open);
-  const char* end = strstr(start, close);
-  if (!end) return NULL;
-  return slice_range(start, end);
-}
 
 // One <<<PATH>>>/<<<OLD>>>/<<<NEW>>> group of an edit block.
 typedef struct {
@@ -1117,8 +1122,35 @@ static void do_apply_edit(char* state, size_t cap, const char* goal) {
   int status = -1;
   char* out = exec_cmd_status(verify_command(), &status);
   if (status == 0) {
-    printf("✅ %sVerification passed.%s\n", ANSI_GREEN, ANSI_RESET);
-    state_append(state, cap, "Verification passed", out);
+    // A green suite is only evidence about the files it reads. The manifest
+    // run_tests.sh prints (one COVERED: line per exercised file) is checked
+    // for the file just edited; a pass over a file no check reads is reported
+    // as the weaker thing it is rather than claimed as verification. See #22.
+    // An edit is a batch now, so the weakest file decides: one hunk landing in
+    // a file no check reads is enough to make the whole pass weaker than it
+    // looks, and naming that file is what makes the warning useful.
+    int covered = 1;
+    const char* uncovered = NULL;
+    for (int i = 0; i < hunk_n; i++) {
+      int c = suite_covers(out, hunks[i].path);
+      if (c < covered) { covered = c; uncovered = hunks[i].path; }
+    }
+    if (covered == 1) {
+      printf("✅ %sVerification passed.%s\n", ANSI_GREEN, ANSI_RESET);
+      state_append(state, cap, "Verification passed", out);
+    } else {
+      char label[512];
+      if (covered == 0) {
+        snprintf(label, sizeof(label),
+          "Verification passed, but nothing in the suite exercises %s", uncovered);
+      } else {
+        snprintf(label, sizeof(label),
+          "Verification passed, but the suite reported no coverage manifest — "
+          "whether it exercises %s is unknown", uncovered ? uncovered : "the edited files");
+      }
+      printf("⚠️  %s%s.%s\n", ANSI_YELLOW, label, ANSI_RESET);
+      state_append(state, cap, label, out);
+    }
   } else {
     printf("❌ %sVerification failed (exit %d) — rolling the edits back.%s\n",
            ANSI_YELLOW, status, ANSI_RESET);
