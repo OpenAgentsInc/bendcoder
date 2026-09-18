@@ -113,25 +113,33 @@ type Question is Data:
   # Score: evaluate along an ordered rubric of levels [level0, level1, ...]
   ScoreQ{qid: String, instructions: String, rubric: List<&2, String>}
 
+# Base's List.map only covers List<&1, _>; this is the List<&2, _> (Data)
+# variant, built on List.foldr. The +t let hands the computed element to the
+# cons as a reusable value, which a &2 list cell requires.
+def map_data_cons(~A: Data, ~B: Data, ~f: A -> B, x: A, acc: List<&2, B>) -> List<&2, B>:
+  +t = f(x)
+  t <> acc
+
+def map_data(~A: Data, ~B: Data, ~f: A -> B, xs: List<&2, A>) -> List<&2, B>:
+  List.foldr(~&2, ~A, ~List<&2, B>, ~map_data_cons(~A, ~B, ~f), xs, {Nil{} : List<&2, B>})
+
+# Serialize one Choice option into a "label":"description" JSON map entry
+def choice_option_to_json(o: OptionPair) -> String:
+  match o:
+    case Opt{label, desc}:
+      "\"" ++ json_escape(label) ++ "\":\"" ++ json_escape(desc) ++ "\""
+
 # Serialize Choice options into JSON map
 def choice_options_to_json(opts: List<&2, OptionPair>) -> String:
-  match opts:
-    case Nil{}:
-      ""
-    case Opt{label, desc} <> Nil{}:
-      "\"" ++ json_escape(label) ++ "\":\"" ++ json_escape(desc) ++ "\""
-    case Opt{label, desc} <> rest:
-      "\"" ++ json_escape(label) ++ "\":\"" ++ json_escape(desc) ++ "\"," ++ choice_options_to_json(rest)
+  String.join(map_data(~OptionPair, ~String, ~choice_option_to_json, opts), ",")
+
+# Serialize one rubric level into a JSON string
+def rubric_item_to_json(item: String) -> String:
+  "\"" ++ json_escape(item) ++ "\""
 
 # Serialize Score rubric into JSON array
 def score_rubric_to_json(rubric: List<&2, String>) -> String:
-  match rubric:
-    case Nil{}:
-      ""
-    case item <> Nil{}:
-      "\"" ++ json_escape(item) ++ "\""
-    case item <> rest:
-      "\"" ++ json_escape(item) ++ "\"," ++ score_rubric_to_json(rest)
+  String.join(map_data(~String, ~String, ~rubric_item_to_json, rubric), ",")
 
 # Serialize single question to JSON
 def question_to_json(q: Question) -> String:
@@ -145,13 +153,7 @@ def question_to_json(q: Question) -> String:
 
 # Serialize list of questions to JSON map body
 def questions_to_json(qs: List<&2, Question>) -> String:
-  match qs:
-    case Nil{}:
-      ""
-    case q <> Nil{}:
-      question_to_json(q)
-    case q <> rest:
-      question_to_json(q) ++ "," ++ questions_to_json(rest)
+  String.join(map_data(~Question, ~String, ~question_to_json, qs), ",")
 
 # Build complete TypeSafe System One request JSON
 def build_classify_payload(state: String, qs: List<&2, Question>) -> String:

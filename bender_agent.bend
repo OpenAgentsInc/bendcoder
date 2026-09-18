@@ -34,7 +34,7 @@ def GenerateText(model: String, system_prompt: String, prompt: String) -> IO(Str
 # Terminal UI Formatting Helpers
 # ------------------------------------------------------------------------------
 def esc() -> String:
-  SCon{Chr{27}, SNil{}}
+  Char.show(Chr{27})
 
 def color_cyan(s: String) -> String:
   esc() ++ "[36m" ++ s ++ esc() ++ "[0m"
@@ -119,21 +119,12 @@ def report(+label: String, +out: String) -> IO(Progress):
 
 # A model asked for one search string routinely prepends its reasoning, so the
 # last non-empty line is taken. Mirrors extract_search_pattern in bender_agent.c.
-# A match cannot scrutinize a computed value, so the emptiness test is made by
-# the caller and dispatched on here.
-def choose_line(is_blank: Bool, line: String, best: String) -> String:
-  match is_blank:
-    case True{}:
-      best
-    case False{}:
-      line
+def keep_last(best: String, line: String) -> String:
+  +t = String.trim(line)
+  Bool.pick(String, String.is_empty(t), best, t)
 
 def pick_last(ls: List<&2, String>, best: String) -> String:
-  match ls:
-    case Nil{}:
-      best
-    case +l <> rest:
-      pick_last(rest, choose_line(String.is_empty(String.trim(l)), String.trim(l), best))
+  List.foldl(~&2, ~String, ~String, ~keep_last, ls, best)
 
 def search_with(+pattern: String) -> IO(Progress):
   do IO<Progress>:
@@ -268,14 +259,7 @@ def run_agent(fuel: Nat, +goal: String) -> IO(Unit):
 
 # Bend has no argv — Base offers only IO.get_env — so the goal arrives as an
 # environment variable, where bender_agent.c takes it from argv[1].
-def goal_or_default(r: Result<&1, &1, U32 & String, String>) -> String:
-  match r:
-    case Fail{e}:
-      "Project: Bender repo. Goal: Inspect the repository, verify hello.bend, and confirm autonomous capabilities are operating."
-    case Done{v}:
-      v
-
 def main() -> IO(Unit):
   do IO<Unit>:
     env : Result<&1, &1, U32 & String, String> <- IO.get_env("BENDER_GOAL")
-    run_agent(6n, goal_or_default(env))
+    run_agent(6n, Result.default(&1, &1, U32 & String, String, env, "Project: Bender repo. Goal: Inspect the repository, verify hello.bend, and confirm autonomous capabilities are operating."))
