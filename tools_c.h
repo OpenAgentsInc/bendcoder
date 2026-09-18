@@ -21,6 +21,9 @@
 // once no limit narrows it, so a stray read cannot swamp the agent's state.
 #define BENDER_MAX_OUTPUT_SIZE (256 * 1024)
 
+// How much of a line the nearest-match hint shows when an Edit misses.
+#define BENDER_NEAREST_MAX_LINE 200
+
 // ----------------------------------------------------------------------------
 // Shared helpers
 // ----------------------------------------------------------------------------
@@ -308,6 +311,74 @@ static char* bender_strip_line_prefixes(const char* s, int* changed) {
   return out;
 }
 
+// When old_string does not match, "not found" is a dead end: it says what did
+// not happen, not what is true, so a model with a wrong idea of the file has
+// nothing to correct against and proposes the same text again. This locates the
+// longest leading run of old_string that does occur and renders the real lines
+// there, turning the failure into a correction signal.
+static char* bender_nearest_hint(const char* content, const char* old_str) {
+  // Every line of old_string is tried as an anchor, not just the first. When a
+  // model fabricates, it usually invents around something real — a made-up
+  // comment above a genuine line of code — so the first line is often the least
+  // reliable one to search for.
+  const char* hit = NULL;
+  const char* line = old_str;
+  while (*line && !hit) {
+    const char* line_nl = strchr(line, '\n');
+    const char* line_stop = line_nl ? line_nl : line + strlen(line);
+
+    const char* start = line;
+    while (start < line_stop && (*start == ' ' || *start == '\t')) start++;
+    size_t line_len = (size_t)(line_stop - start);
+    while (line_len > 0 && (start[line_len - 1] == ' ' || start[line_len - 1] == '\r')) line_len--;
+
+    if (line_len >= 8) {
+      char* needle = (char*)malloc(line_len + 1);
+      if (!needle) return NULL;
+      memcpy(needle, start, line_len);
+      needle[line_len] = '\0';
+      // Shrink from the right, so a line that is nearly right still anchors on
+      // the part that is.
+      for (size_t len = line_len; len >= 8; len--) {
+        needle[len] = '\0';
+        hit = strstr(content, needle);
+        if (hit) break;
+      }
+      free(needle);
+    }
+
+    if (!line_nl) break;
+    line = line_nl + 1;
+  }
+  if (!hit) return NULL;
+
+  // Which line is it on, and what do the next few lines actually say?
+  long line_no = 1;
+  for (const char* p = content; p < hit; p++) {
+    if (*p == '\n') line_no++;
+  }
+  const char* line_start = hit;
+  while (line_start > content && line_start[-1] != '\n') line_start--;
+
+  // Four lines, each clipped, is all the context that is useful here, so a
+  // fixed buffer is enough and keeps this independent of the Grep section.
+  char out[4 * (BENDER_NEAREST_MAX_LINE + 24)];
+  size_t o = 0;
+  const char* p = line_start;
+  for (int i = 0; i < 4 && *p && o < sizeof(out) - 1; i++) {
+    const char* e = strchr(p, '\n');
+    size_t l = e ? (size_t)(e - p) : strlen(p);
+    if (l > BENDER_NEAREST_MAX_LINE) l = BENDER_NEAREST_MAX_LINE;
+    int n = snprintf(out + o, sizeof(out) - o, "%ld:%.*s\n", line_no + i, (int)l, p);
+    if (n < 0) break;
+    o += (size_t)n < sizeof(out) - o ? (size_t)n : sizeof(out) - o - 1;
+    if (!e) break;
+    p = e + 1;
+  }
+  if (o > 0 && out[o - 1] == '\n') out[o - 1] = '\0';
+  return strdup(out);
+}
+
 // ----------------------------------------------------------------------------
 // Edit
 // ----------------------------------------------------------------------------
@@ -359,11 +430,20 @@ static char* tool_edit(const char* path, const char* old_str, const char* new_st
   }
 
   if (matches == 0) {
-    char* err = bender_fmt(
-      "error: String to replace not found in %s. Line-number prefixes were "
-      "stripped and it still did not match, so copy the text exactly as it "
-      "appears in the file, without the \"N<tab>\" Read adds.\nString: %s",
-      path, old_str);
+    char* hint = bender_nearest_hint(content, old_str);
+    char* err;
+    if (hint) {
+      err = bender_fmt(
+        "error: String to replace not found in %s. The closest text found is:\n%s\n"
+        "Copy from there exactly, without the \"N<tab>\" prefix Read adds.\n"
+        "Your string was:\n%s", path, hint, old_str);
+      free(hint);
+    } else {
+      err = bender_fmt(
+        "error: String to replace not found in %s, and no part of it appears in "
+        "the file at all — re-read the file before editing it.\nYour string was:\n%s",
+        path, old_str);
+    }
     free(stripped);
     free(content);
     return err;

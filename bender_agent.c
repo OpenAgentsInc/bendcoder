@@ -423,6 +423,15 @@ typedef struct {
 static ReadCursor read_cursors[BENDER_MAX_TRACKED_READS];
 static int read_cursor_count = 0;
 
+// Lookup that does not create an entry: used to tell whether a file has been
+// read at all, which read_cursor_for cannot answer since it always returns one.
+static ReadCursor* read_cursor_find(const char* path) {
+  for (int i = 0; i < read_cursor_count; i++) {
+    if (strcmp(read_cursors[i].path, path) == 0) return &read_cursors[i];
+  }
+  return NULL;
+}
+
 static ReadCursor* read_cursor_for(const char* path) {
   for (int i = 0; i < read_cursor_count; i++) {
     if (strcmp(read_cursors[i].path, path) == 0) return &read_cursors[i];
@@ -583,6 +592,22 @@ static void do_apply_edit(char* state, size_t cap, const char* goal) {
   if (!path_is_in_repo(path)) {
     printf("🚫 %sRefusing to edit outside the repository: '%s'%s\n", ANSI_YELLOW, path, ANSI_RESET);
     state_append(state, cap, "Edit refused", "The requested path is outside the repository.");
+    free(path); free(old_str); free(new_str);
+    return;
+  }
+
+  // An edit to a file the agent has not read is a guess. ~/coder's Edit refuses
+  // it for the same reason ("File has not been read yet"), and the loop needs
+  // the refusal more, because nothing else stops it inventing plausible text
+  // and proposing it over and over.
+  if (bender_exists(path) && !read_cursor_find(path)) {
+    printf("🚫 %s'%s' has not been read yet; refusing to edit it blind.%s\n",
+           ANSI_YELLOW, path, ANSI_RESET);
+    char note[512];
+    snprintf(note, sizeof(note),
+      "%s has not been read yet, so the edit was refused. Read it first, then "
+      "quote its text exactly.", path);
+    state_append(state, cap, "Edit refused", note);
     free(path); free(old_str); free(new_str);
     return;
   }

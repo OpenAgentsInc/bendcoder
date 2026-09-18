@@ -104,6 +104,33 @@ int main(void) {
   char* e5 = tool_edit(tmp, "\tTHREE", "three", 0);
   check(strncmp(e5, "The file", 8) == 0, "tool_edit strips a leftover leading tab");
   free(e5);
+  // A miss must say what the file actually contains, or the model has nothing
+  // to correct against and proposes the same wrong text again.
+  char* e_hint = tool_edit(tmp, "  check(nothing_like_this_exists);", "x", 0);
+  check(strncmp(e_hint, "error:", 6) == 0, "a fabricated old_string is refused");
+  check(strstr(e_hint, "no part of it appears") != NULL,
+        "a wholly invented string says so rather than hinting");
+  free(e_hint);
+  // A realistic file: the hint anchors on a line, so it needs lines long enough
+  // to identify one, which is the case it exists for.
+  const char* codeish =
+    "static void command_run_worker(IoWork* w) {\n"
+    "  char* cmd = w->data;\n"
+    "  pclose(pipe);\n"
+    "  return;\n"
+    "}\n";
+  char* wc = tool_write("/tmp/bender_tool_test/codeish.c", codeish, strlen(codeish));
+  free(wc);
+  // The shape the agent actually failed with: right idea, invented comments
+  // and indentation that is not in the file.
+  char* e_near = tool_edit("/tmp/bender_tool_test/codeish.c",
+                           "    // close pipe and ignore exit status\n    pclose(pipe);\n", "x", 0);
+  check(e_near && strstr(e_near, "closest text found") != NULL,
+        "a near miss reports the closest real text");
+  check(e_near && strstr(e_near, "3:  pclose(pipe);") != NULL,
+        "the hint shows the real line, numbered, at its real position");
+  free(e_near);
+
   char* e6 = tool_edit(tmp, "12:absent", "x", 0);
   check(strncmp(e6, "error:", 6) == 0, "stripping does not invent a match that is not there");
   free(e6);
