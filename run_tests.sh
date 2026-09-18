@@ -77,7 +77,7 @@ void  io_eff(u32 cid, Effect run, u32 need);
 
 #define CID_COMMAND_RUN        1
 #define CID_SYS_READ_FILE      2
-#define CID_SYS_READ_LINES     3
+#define CID_SYS_READ_RAW       3
 #define CID_SYS_WRITE_FILE     4
 #define CID_SYS_EDIT_FILE      5
 #define CID_SYS_GREP_FILE      6
@@ -133,6 +133,12 @@ bend action.bend >/dev/null
 # unproved law fails here the way a failing test does.
 echo "== PROOF.bend proves the path guard =="
 bend PROOF.bend >/dev/null
+
+# tool_read.bend carries its own laws -- the paging arithmetic and the
+# line-number round-trip Edit's fallback depends on. Checking the module is
+# what makes them a gate rather than a comment.
+echo "== tool_read.bend proves its laws =="
+bend tool_read.bend >/dev/null
 
 # bender_agent.bend uses only some of the laws sys_c.c defines, so this also
 # guards the #ifdef CID_* guards in sys_c.c against regressing (issue #5).
@@ -221,7 +227,7 @@ local_refs() {
 SEEN="$WORK/covered.txt"; : > "$SEEN"
 queue="run_tests.sh test_tools.c bender_agent.c"
 queue="$queue $(grep -l '^#|' *.bend 2>/dev/null)"
-queue="$queue action.bend bender_agent.bend call_typesafe.bend PROOF.bend"
+queue="$queue action.bend bender_agent.bend call_typesafe.bend PROOF.bend tool_read.bend"
 queue="$queue *.sh *.md docs/*.md"
 while [ -n "$queue" ]; do
   next=""

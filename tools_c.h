@@ -10,6 +10,7 @@
 #ifndef BENDER_TOOLS_C_H
 #define BENDER_TOOLS_C_H
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -168,42 +169,77 @@ static char* bender_write_bytes(const char* path, const char* data, size_t len) 
 // ----------------------------------------------------------------------------
 // Read
 // ----------------------------------------------------------------------------
-// 1-indexed lines rendered as "N\tline", the format ~/coder's add_line_numbers
-// produces, so a line number quoted back by the model addresses the same line.
-// `offset` is the first line to emit (0 and 1 both mean line 1); `limit` <= 0
-// means "to the end of the file".
-static char* tool_read(const char* path, long offset, long limit) {
-  if (offset < 1) offset = 1;
-
+// tool_read_io is the IO half of Read — the only part that must live in C.
+// The directory and existence checks, the whole-file size cap, the slurp and
+// the BOM strip all need the file's size or its bytes. Everything downstream
+// (the split on '\n', the offset/limit selection, the "N\tline" rendering) is
+// a pure String -> String that lives in tool_read.bend, where its laws are
+// proved; tool_read below is that pure half's C mirror for bender_agent.c,
+// which serves read pages without the Bend loop. Keep them in step.
+//
+// Returns a malloc'd buffer. *code is 0 on success and *len the byte count
+// after the BOM strip; on failure *code is an errno-style category and the
+// buffer holds the "error: " text tool_read reported.
+static char* tool_read_io(const char* path, long limit, int* code, size_t* len) {
   if (bender_is_dir(path)) {
-    return bender_fmt("error: EISDIR: illegal operation on a directory, read '%s'", path);
+    *code = EISDIR;
+    char* msg = bender_fmt("error: EISDIR: illegal operation on a directory, read '%s'", path);
+    *len = msg ? strlen(msg) : 0;
+    return msg;
   }
 
   struct stat st;
   if (stat(path, &st) != 0) {
-    return bender_fmt("error: File does not exist: %s", path);
+    *code = ENOENT;
+    char* msg = bender_fmt("error: File does not exist: %s", path);
+    *len = msg ? strlen(msg) : 0;
+    return msg;
   }
   if (limit <= 0 && st.st_size > BENDER_MAX_OUTPUT_SIZE) {
-    return bender_fmt(
+    *code = EFBIG;
+    char* msg = bender_fmt(
       "error: File content (%lld bytes) exceeds maximum allowed size (%d bytes). "
       "Use offset and limit to read specific portions of the file.",
       (long long)st.st_size, BENDER_MAX_OUTPUT_SIZE);
+    *len = msg ? strlen(msg) : 0;
+    return msg;
   }
 
+  char* content = bender_slurp(path, len);
+  if (!content) {
+    *code = EIO;
+    char* msg = bender_fmt("error: Failed to read %s", path);
+    *len = msg ? strlen(msg) : 0;
+    return msg;
+  }
+
+  // Skip a UTF-8 BOM in place, so the returned buffer stays the allocation
+  // and the FFI worker can free it without tracking a second pointer.
+  if (*len >= 3 && (unsigned char)content[0] == 0xEF &&
+      (unsigned char)content[1] == 0xBB && (unsigned char)content[2] == 0xBF) {
+    memmove(content, content + 3, *len - 2);
+    *len -= 3;
+  }
+  *code = 0;
+  return content;
+}
+
+// The C mirror of render() in tool_read.bend — 1-indexed lines rendered as
+// "N\tline", the format ~/coder's add_line_numbers produces, so a line number
+// quoted back by the model addresses the same line. `offset` is the first
+// line to emit (0 and 1 both mean line 1); `limit` <= 0 means "to the end of
+// the file". bender_agent.c is its only caller; sys_c.c uses tool_read_io.
+__attribute__((unused))
+static char* tool_read(const char* path, long offset, long limit) {
+  if (offset < 1) offset = 1;
+
+  int code = 0;
   size_t len = 0;
-  char* content = bender_slurp(path, &len);
-  if (!content) return bender_fmt("error: Failed to read %s", path);
-
-  // Skip a UTF-8 BOM so it does not land at the head of line 1.
-  char* text = content;
-  if (len >= 3 && (unsigned char)text[0] == 0xEF &&
-      (unsigned char)text[1] == 0xBB && (unsigned char)text[2] == 0xBF) {
-    text += 3;
-    len -= 3;
-  }
+  char* text = tool_read_io(path, limit, &code, &len);
+  if (code) return text;
 
   if (len == 0) {
-    free(content);
+    free(text);
     return strdup("<system-reminder>Warning: the file exists but the contents are empty.</system-reminder>");
   }
 
@@ -214,7 +250,7 @@ static char* tool_read(const char* path, long offset, long limit) {
 
   size_t cap = len + 64;
   char* out = (char*)malloc(cap);
-  if (!out) { free(content); return strdup("error: out of memory"); }
+  if (!out) { free(text); return strdup("error: out of memory"); }
   size_t o = 0;
   long index = 0;
   long emitted = 0;
@@ -231,7 +267,7 @@ static char* tool_read(const char* path, long offset, long limit) {
       if (o + line_len + 24 > cap) {
         cap = (o + line_len + 64) * 2;
         char* grown = (char*)realloc(out, cap);
-        if (!grown) { free(out); free(content); return strdup("error: out of memory"); }
+        if (!grown) { free(out); free(text); return strdup("error: out of memory"); }
         out = grown;
       }
       if (emitted > 0) out[o++] = '\n';
@@ -245,7 +281,7 @@ static char* tool_read(const char* path, long offset, long limit) {
     cur = nl + 1;
   }
   out[o] = '\0';
-  free(content);
+  free(text);
 
   if (emitted == 0) {
     free(out);

@@ -1,4 +1,5 @@
 import Base
+import ./tool_read.bend as T
 
 # ==============================================================================
 # Bender Agent Core: Classify & Generate
@@ -48,10 +49,15 @@ law sys.read_file:
 def sys.read_file(path):
   import "./sys_c.c"
 
-law sys.read_lines:
-  String -> String -> String -> IO(String)
+# The IO half of Read: the stat checks, the 256 KB cap and the BOM strip,
+# which need the file's size and its bytes. Returns Done{content} — the raw
+# bytes, BOM already stripped — or Fail{(code, message)} with the "error: ..."
+# text. Everything downstream (split, offset/limit, "N\tline") is pure and
+# lives in tool_read.bend, where its laws are proved.
+law sys.read_raw:
+  String -> String -> IO(Result<&1, &1, U32 & String, String>)
 
-def sys.read_lines(path, offset, limit):
+def sys.read_raw(path, limit):
   import "./sys_c.c"
 
 law sys.write_file:
@@ -241,8 +247,12 @@ def ReadFile(path: String) -> IO(String):
 
 # Read: 1-indexed lines rendered as "N\tline". offset is the first line to
 # emit (0 and 1 both mean line 1); limit 0 reads to the end of the file.
-def Read(path: String, offset: U32, limit: U32) -> IO(String):
-  sys.read_lines(path, U32.show(offset), U32.show(limit))
+# sys.read_raw delivers the bytes and the checked failures; tool_read.bend's
+# finish() applies the pure split/select/render or relays the error text.
+def Read(path: String, offset: U32, +limit: U32) -> IO(String):
+  do IO<String>:
+    r : Result<&1, &1, U32 & String, String> <- sys.read_raw(path, U32.show(limit))
+    IO.pure(String, T.finish(r, offset, limit))
 
 # Write: full write / overwrite, creating any missing parent directories.
 # Returns a status line naming the file it created or updated.
