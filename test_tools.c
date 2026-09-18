@@ -106,6 +106,31 @@ int main(void) {
   check(r3 && strcmp(r3, "4\tNINE") == 0, "the literal line was replaced, not a stripped one");
   free(r3);
 
+  // ----------------------------------------------------------------------
+  // Grep: test pattern matching, non‑matching, and directory handling.
+  // ----------------------------------------------------------------------
+  // The file currently contains:
+  //   one
+  //   TWO
+  //   three
+  //   9    NINE
+  // Grep for a line that exists.
+  char* g1 = tool_grep("TWO", tmp);
+  check(g1 && strcmp(g1, "2:TWO") == 0, "tool_grep matches pattern");
+  free(g1);
+
+  // Grep for a pattern that does not exist.
+  char* g2 = tool_grep("absent", tmp);
+  check(g2 && strstr(g2, "No matches found") != NULL,
+        "tool_grep reports no matches");
+  free(g2);
+
+  // Grep a directory should produce an error.
+  char* g3 = tool_grep("anything", "/tmp/bender_tool_test");
+  check(g3 && strncmp(g3, "error:", 6) == 0,
+        "tool_grep on a directory yields error");
+  free(g3);
+
   printf("\n%d failure(s)\n", fails);
   return fails != 0;
 }
