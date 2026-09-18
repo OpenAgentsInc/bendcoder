@@ -226,6 +226,274 @@ def route(a: LoopAnswers) -> Route:
       route.action(action, repeats, asked, risk)
 
 # ------------------------------------------------------------------------------
+# The edit anchor: a Choice over line ids instead of transcribed text
+# ------------------------------------------------------------------------------
+# apply_edit's dominant failure is fabrication: a generative model asked to
+# copy a file's bytes verbatim into `old_string` invents text that is not
+# there (#23). Jev generates nothing, so it cannot emit wrong text. The
+# line-by-line search cookbook turns that into the anchor: tag each line with
+# an id, rank the ids with one Choice, and let a Noul say whether the file
+# holds the thing to change at all. Read already tags the lines — the "N\t"
+# prefixes are the ids — and code takes the chosen line's exact bytes from
+# the file, which is where fabrication stops being recoverable and becomes
+# impossible. The generative model writes only `new_string`, the part that is
+# genuinely new.
+#
+# The picks run inside apply_edit rather than beside `action` in questions():
+# their options depend on which file the edit targets, which only exists once
+# the edit starts. The thresholds still sit here — a threshold reviews beside
+# the question it reads (rule 7), not beside the call site.
+
+# Lines an anchor window spans — under the 255-option cap a Choice enforces.
+def anchor_page() -> Nat: 200n
+
+# One row of a Read page ("N<TAB>line") as a Choice option: the line number is
+# the label and the line's text the description — the same shape the cookbook
+# tags its document with. A row without a tab carries no id (tool warnings
+# are the only ones a page can hold) and is dropped rather than offered.
+def page_option.of(ok: Bool, +id: String, +desc: String) -> Maybe<&2, P.OptionPair>:
+  match ok:
+    case False{}:
+      None{}
+    case True{}:
+      Some{P.Opt{id, desc}}
+
+# List.head's Maybe is matched inside a helper on a parameter, the workaround
+# every computed scrutinee in this codebase takes.
+def head_or(+d: String, m: Maybe<&2, String>) -> String:
+  match m:
+    case Some{+s}:
+      s
+    case None{}:
+      d
+
+def page_option.with(+id: String, +desc: String, +line: String) -> Maybe<&2, P.OptionPair>:
+  page_option.of(
+    Bool.and(String.contains(line, "\t"), Bool.not(String.is_empty(id))),
+    id, desc)
+
+# The line's text may itself hold tabs, so the description is the fields after
+# the first re-joined rather than the second field alone.
+def page_option(+line: String) -> Maybe<&2, P.OptionPair>:
+  +parts = String.split(line, '\t')
+  page_option.with(
+    head_or("", List.head(&2, String, parts)),
+    String.join(List.tail(&2, String, parts), "\t"),
+    line)
+
+def page_options.put.of(o: Maybe<&2, P.OptionPair>, acc: List<&2, P.OptionPair>) -> List<&2, P.OptionPair>:
+  match o:
+    case Some{+opt}:
+      opt <> acc
+    case None{}:
+      acc
+
+def page_options.put(line: String, acc: List<&2, P.OptionPair>) -> List<&2, P.OptionPair>:
+  page_options.put.of(page_option(line), acc)
+
+# The helper that turns a read page into Choice options. A window is always
+# under the cap already, but take no chances: the Choice refuses more than
+# 255 options.
+def page_options(+page: String) -> List<&2, P.OptionPair>:
+  List.take(&2, P.OptionPair,
+    List.foldr(~&2, ~String, ~List<&2, P.OptionPair>, ~page_options.put,
+      String.lines(page), {Nil{} : List<&2, P.OptionPair>}),
+    255n)
+
+# One tracked file as a Choice option. The description repeats the path — the
+# C loop reads each file's first line for one, and the twin takes the cheaper
+# summary the name already gives.
+def listing_option.of(ok: Bool, +path: String, acc: List<&2, P.OptionPair>) -> List<&2, P.OptionPair>:
+  match ok:
+    case True{}:
+      P.Opt{path, path} <> acc
+    case False{}:
+      acc
+
+def listing_option(+path: String, acc: List<&2, P.OptionPair>) -> List<&2, P.OptionPair>:
+  listing_option.of(Bool.not(String.is_empty(String.trim(path))), path, acc)
+
+# foldr's element function is affine, and one path serves the trim check and
+# the option both, so the listing folds by hand.
+def listing_options.go(+ls: List<&2, String>, acc: List<&2, P.OptionPair>) -> List<&2, P.OptionPair>:
+  match ls:
+    case Nil{}:
+      List.reverse(&2, P.OptionPair, acc)
+    case +h <> t:
+      listing_options.go(t, listing_option(h, acc))
+
+# The `none` escape hatch always keeps a slot — a Choice's probabilities sum
+# to one, so without it Jev must name a file even when none hold the change.
+def listing_options(+listing: String) -> List<&2, P.OptionPair>:
+  List.append(&2, P.OptionPair,
+    List.take(&2, P.OptionPair,
+      listing_options.go(String.lines(listing), {Nil{} : List<&2, P.OptionPair>}),
+      254n),
+    [P.Opt{"none", "No listed file holds the code the change belongs in"}])
+
+# A window's label is the line number it starts at — parseable straight back
+# with U32.read — and its description the span it covers.
+def window_option(+start: Nat, +nlines: Nat, +page: Nat) -> P.OptionPair:
+  P.Opt{
+    U32.show(U32.from_nat(Nat.add(1n, start))),
+    "lines " ++ U32.show(U32.from_nat(Nat.add(1n, start))) ++ " to " ++
+      U32.show(U32.from_nat(Nat.min(Nat.add(start, page), nlines)))
+  }
+
+# fuel is the window count — one option per `page` lines — so the self-call
+# shrinks it while `start` steps forward a page at a time.
+def window_options.go(fuel: Nat, +start: Nat, +nlines: Nat, +page: Nat, acc: List<&2, P.OptionPair>) -> List<&2, P.OptionPair>:
+  match fuel:
+    case 0n:
+      List.reverse(&2, P.OptionPair, acc)
+    case 1n+f:
+      window_options.go(f, Nat.add(start, page), nlines, page,
+        window_option(start, nlines, page) <> acc)
+
+def window_options(+nlines: Nat, +page: Nat) -> List<&2, P.OptionPair>:
+  List.append(&2, P.OptionPair,
+    window_options.go(Nat.div(Nat.sub(Nat.add(nlines, page), 1n), page),
+      0n, nlines, page, {Nil{} : List<&2, P.OptionPair>}),
+    [P.Opt{"none", "The code to change is not in any of these ranges"}])
+
+# Which file the change belongs in — a closed set, so it is a Choice, and the
+# file picked is always one the options listed.
+def edit_file_questions(+listing: String) -> List<&2, P.Question>:
+  [
+    P.ChoiceQ{
+      "file_to_edit",
+      "Which single file holds the code the requested change needs to modify?",
+      listing_options(listing)
+    }
+  ]
+
+# Past the option cap the cookbook pages the ids: one Choice picks a window
+# of lines and a second ranks the lines inside it.
+def edit_window_questions(+path: String, +nlines: Nat, +page: Nat) -> List<&2, P.Question>:
+  [
+    P.ChoiceQ{
+      "edit_window",
+      "The change belongs in " ++ path ++ ", which is longer than one page of options. Which range of lines is most likely to hold the code the requested change modifies?",
+      window_options(nlines, page)
+    }
+  ]
+
+# The anchor itself: one Choice over the window's line ids and one Noul for
+# whether the file holds the thing to change at all — the no-match outcome a
+# sum-to-one Choice cannot express on its own.
+def anchor_questions(+path: String, +page: String) -> List<&2, P.Question>:
+  [
+    P.ChoiceQ{
+      "edit_anchor",
+      "Which single line of " ++ path ++ " does the requested change belong at? The option's name is the line number; its description is the line's exact text.",
+      page_options(page)
+    },
+    P.NoulQ{
+      "edit_present",
+      "Does " ++ path ++ " contain the code the requested change needs to modify?"
+    }
+  ]
+
+# `file_to_edit` and `edit_window` confidence floors. Both pick a candidate to
+# look inside rather than an action to take, so they sit lower than the
+# action floors: a wrong pick costs one more Jev call before the sentinel
+# fallback, not a write. Not yet tuned on labeled data.
+def edit_file_floor() -> F32: 0.40
+def edit_window_floor() -> F32: 0.40
+
+# `edit_anchor` confidence floor: under it the Choice is guessing and the
+# sentinel draft takes over. Not yet tuned on labeled data.
+def anchor_choice_floor() -> F32: 0.60
+
+# `edit_present` floor. The line-by-line cookbook measured a present answer at
+# or above 0.9 and an absent one at or below 0.05 on the Noul, so 0.5
+# separates the cases it measured; treat it as a starting point to re-measure
+# on this repository.
+def anchor_noul_floor() -> F32: 0.50
+
+# The single-question picks: a Choice answer reads as its label when it is
+# confident enough, and everything else — `none`, a low confidence, a missing
+# or mistyped answer — reads as no pick, which sends the caller down the
+# sentinel fallback.
+def pick_label.of(is_none: Bool, low: Bool, +label: String) -> Maybe<&2, String>:
+  match is_none low:
+    case True{} _:
+      None{}
+    case _ True{}:
+      None{}
+    case _ _:
+      Some{label}
+
+def pick_label(+a: P.Answer, +floor: F32) -> Maybe<&2, String>:
+  match a:
+    case P.Chosen{+choice, +confidence}:
+      pick_label.of(String.eq(choice, "none"), F32.is_lt(confidence, floor), choice)
+    case _:
+      None{}
+
+def edit_file_pick(+a: P.Answer) -> Maybe<&2, String>:
+  pick_label(a, edit_file_floor())
+
+def edit_window_pick.of(m: Maybe<&2, String>) -> Maybe<&2, U32>:
+  match m:
+    case Some{+label}:
+      U32.read(label)
+    case None{}:
+      None{}
+
+# The window answer reads as the line its range starts at; anything unusable
+# is no pick.
+def edit_window_pick(+a: P.Answer) -> Maybe<&2, U32>:
+  edit_window_pick.of(pick_label(a, edit_window_floor()))
+
+# What the anchor answers route to: Anchor is the line the change belongs at —
+# code slices its bytes out of the file — and AnchorBack hands the edit back
+# to the sentinel draft with the reason the anchor did not hold.
+type AnchorRoute is Data:
+  Anchor{line: U32}
+  AnchorBack{reason: String}
+
+# A Noul under the floor reads as absent; a missing or mistyped answer reads
+# the same — it cannot show the file holds the code, which is the safe
+# direction for a gate.
+def noul_below(+a: P.Answer, +floor: F32) -> Bool:
+  match a:
+    case P.Nouled{+probability}:
+      F32.is_lt(probability, floor)
+    case _:
+      True{}
+
+# The gate rows, as Bool scrutinees computed by the caller so each row can be
+# pinned by a law below — the same shape route.gate takes.
+def anchor_route.gate(absent: Bool, low: Bool, line: U32) -> AnchorRoute:
+  match absent low:
+    case True{} _:
+      AnchorBack{"the file does not contain the code the change needs"}
+    case _ True{}:
+      AnchorBack{"the anchor Choice was not confident enough to trust"}
+    case _ _:
+      Anchor{line}
+
+def anchor_route.picked(m: Maybe<&2, U32>, +confidence: F32, +noul: P.Answer) -> AnchorRoute:
+  match m:
+    case Some{line}:
+      anchor_route.gate(
+        noul_below(noul, anchor_noul_floor()),
+        F32.is_lt(confidence, anchor_choice_floor()),
+        line)
+    case None{}:
+      AnchorBack{"the anchor Choice named no line of the file"}
+
+def anchor_route(+choice: P.Answer, +noul: P.Answer) -> AnchorRoute:
+  match choice:
+    case P.Chosen{+label, +confidence}:
+      anchor_route.picked(U32.read(label), confidence, noul)
+    case P.Missing{+reason}:
+      AnchorBack{"Classify returned no anchor: " ++ reason}
+    case _:
+      AnchorBack{"'edit_anchor' answered with the wrong type"}
+
+# ------------------------------------------------------------------------------
 # The laws: each row is what it claims to be
 # ------------------------------------------------------------------------------
 # The gate rows are proved over every action; moving an arm or weakening a row
@@ -280,6 +548,42 @@ law Selector.missing_halts:
     == Stop{"Classify returned no answer: rate limited"} : Route}
 def Selector.missing_halts(): {==}
 
+# LAW: a file that does not hold the code sends the edit back to the draft
+law Selector.anchor_absent_backs:
+  for line: U32
+  {anchor_route.gate(True{}, False{}, line) == AnchorBack{"the file does not contain the code the change needs"} : AnchorRoute}
+def Selector.anchor_absent_backs(line): {==}
+
+# LAW: absence wins over confidence — the gate checks presence first
+law Selector.anchor_absent_first:
+  for line: U32
+  {anchor_route.gate(True{}, True{}, line) == AnchorBack{"the file does not contain the code the change needs"} : AnchorRoute}
+def Selector.anchor_absent_first(line): {==}
+
+# LAW: an under-floor anchor sends the edit back to the draft
+law Selector.anchor_low_backs:
+  for line: U32
+  {anchor_route.gate(False{}, True{}, line) == AnchorBack{"the anchor Choice was not confident enough to trust"} : AnchorRoute}
+def Selector.anchor_low_backs(line): {==}
+
+# LAW: a confident anchor over a present file keeps its line
+law Selector.anchor_keeps:
+  for line: U32
+  {anchor_route.gate(False{}, False{}, line) == Anchor{line} : AnchorRoute}
+def Selector.anchor_keeps(line): {==}
+
+# LAW: a missing anchor answer backs out with the reason it carried
+law Selector.anchor_missing_backs:
+  {anchor_route(P.Missing{"rate limited"}, P.Nouled{0.9})
+    == AnchorBack{"Classify returned no anchor: rate limited"} : AnchorRoute}
+def Selector.anchor_missing_backs(): {==}
+
+# LAW: an anchor naming no line backs out
+law Selector.anchor_unparsable_backs:
+  {anchor_route(P.Chosen{"bogus", 0.9}, P.Nouled{0.9})
+    == AnchorBack{"the anchor Choice named no line of the file"} : AnchorRoute}
+def Selector.anchor_unparsable_backs(): {==}
+
 # ------------------------------------------------------------------------------
 # The table, exercised: each row's expected output is pinned by #| below
 # ------------------------------------------------------------------------------
@@ -299,6 +603,21 @@ def show_route(r: Route) -> String:
 def probe(+label: String, a: LoopAnswers) -> IO(Unit):
   IO.print(label ++ " -> " ++ show_route(route(a)))
 
+def show_opt(o: P.OptionPair) -> String:
+  match o:
+    case P.Opt{+label, +desc}:
+      label ++ " => " ++ desc
+
+def show_anchor_route(r: AnchorRoute) -> String:
+  match r:
+    case Anchor{+line}:
+      "anchor(" ++ U32.show(line) ++ ")"
+    case AnchorBack{+reason}:
+      "back(" ++ reason ++ ")"
+
+def aprobe(+label: String, r: AnchorRoute) -> IO(Unit):
+  IO.print(label ++ " -> " ++ show_anchor_route(r))
+
 def main() -> IO(Unit):
   do IO<Unit>:
     u1 : Unit <- probe("confident read_code",       Ans{P.Chosen{"read_code", 0.9},       P.Nouled{0.1}, P.Nouled{0.1}, P.Nouled{0.1}, P.Scored{0.2, 0.8}, P.Scored{0.1, 0.9}})
@@ -310,7 +629,14 @@ def main() -> IO(Unit):
     u7 : Unit <- probe("top risk, asked",           Ans{P.Chosen{"apply_edit", 0.9},      P.Nouled{0.1}, P.Nouled{0.1}, P.Nouled{0.9}, P.Scored{1.8, 0.8}, P.Scored{0.1, 0.9}})
     u8 : Unit <- probe("none",                      Ans{P.Chosen{"none", 0.9},            P.Nouled{0.1}, P.Nouled{0.1}, P.Nouled{0.1}, P.Scored{0.2, 0.8}, P.Scored{0.1, 0.9}})
     u9 : Unit <- probe("names no action",           Ans{P.Chosen{"bogus", 0.9},           P.Nouled{0.1}, P.Nouled{0.1}, P.Nouled{0.1}, P.Scored{0.2, 0.8}, P.Scored{0.1, 0.9}})
-    probe("missing",                                Ans{P.Missing{"rate limited"},        P.Nouled{0.1}, P.Nouled{0.1}, P.Nouled{0.1}, P.Scored{0.2, 0.8}, P.Scored{0.1, 0.9}})
+    u10 : Unit <- probe("missing",                  Ans{P.Missing{"rate limited"},        P.Nouled{0.1}, P.Nouled{0.1}, P.Nouled{0.1}, P.Scored{0.2, 0.8}, P.Scored{0.1, 0.9}})
+    u11 : Unit <- IO.print("page options -> " ++ List.show(~&2, ~P.OptionPair, ~show_opt, page_options("3\tthree\n7\tseven\nno tab here\n12\ttwelve")))
+    u12 : Unit <- IO.print("window options -> " ++ List.show(~&2, ~P.OptionPair, ~show_opt, window_options(560n, 200n)))
+    u13 : Unit <- aprobe("confident anchor, present", anchor_route(P.Chosen{"7", 0.9}, P.Nouled{0.95}))
+    u14 : Unit <- aprobe("confident anchor, absent",  anchor_route(P.Chosen{"7", 0.9}, P.Nouled{0.1}))
+    u15 : Unit <- aprobe("low-confidence anchor",     anchor_route(P.Chosen{"7", 0.3}, P.Nouled{0.95}))
+    u16 : Unit <- aprobe("unparsable anchor",         anchor_route(P.Chosen{"bogus", 0.9}, P.Nouled{0.95}))
+    aprobe("missing anchor",                          anchor_route(P.Missing{"rate limited"}, P.Nouled{0.95}))
 
 #|confident read_code -> act(read_code)
 #|mid-confidence read_code -> act(read_code)
@@ -322,3 +648,10 @@ def main() -> IO(Unit):
 #|none -> halt(Classify reported that no listed action fits the current state.)
 #|names no action -> halt(Classify returned a decision that names no action.)
 #|missing -> halt(Classify returned no answer: rate limited)
+#|page options -> [3 => three, 7 => seven, 12 => twelve]
+#|window options -> [1 => lines 1 to 200, 201 => lines 201 to 400, 401 => lines 401 to 560, none => The code to change is not in any of these ranges]
+#|confident anchor, present -> anchor(7)
+#|confident anchor, absent -> back(the file does not contain the code the change needs)
+#|low-confidence anchor -> back(the anchor Choice was not confident enough to trust)
+#|unparsable anchor -> back(the anchor Choice named no line of the file)
+#|missing anchor -> back(Classify returned no anchor: rate limited)

@@ -382,6 +382,8 @@ def act_apply_edit(e: Edit, +state: String) -> IO(Progress):
 
 # do_apply_edit's Bend twin: draft the edit with the generation model, parse
 # the reply into an Edit, and let act_apply_edit's match handle the rest.
+# This is also the anchor path's fallback: whenever a pick comes back absent,
+# unconfident or unusable, the edit drops to drafting the sentinel block.
 def draft_apply_edit(+state: String) -> IO(Progress):
   do IO<Progress>:
     u1 : Unit <- IO.print(color_magenta("[TOOL EDIT] Drafting an edit via OpenRouter ..."))
@@ -390,6 +392,199 @@ def draft_apply_edit(+state: String) -> IO(Progress):
       edit_format_system(),
       "State so far:\n" ++ state)
     act_apply_edit(parse_edit(reply), state)
+
+# ------------------------------------------------------------------------------
+# The anchored edit: a Choice over line ids, never a transcribed old_string
+# ------------------------------------------------------------------------------
+# The Bend twin of try_anchor_edit in bender_agent.c. Jev picks the file, the
+# line window and the anchor line; the exact `old_str` bytes are sliced out of
+# the file that was read — the model is never asked to reproduce them, so it
+# cannot invent them (#23's failure made impossible rather than recoverable).
+# The generative model writes only the replacement text, the part that is
+# genuinely new. Every pick that comes back absent, unconfident or unusable
+# lands in draft_apply_edit, the sentinel path from before this change.
+
+# Non-overlapping occurrences of pat in s. `after` hands back a strictly
+# shorter suffix on each hit, and fuel — the string's own length plus one —
+# bounds the walk, which is what a Bend self-call must shrink.
+def occurs.go(fuel: Nat, +s: String, +pat: String, found: Bool) -> Nat:
+  match fuel found:
+    case 0n _:
+      0n
+    case _ False{}:
+      0n
+    case 1n+f True{}:
+      +rest = after(s, pat)
+      Nat.add(1n, occurs.go(f, rest, pat, String.contains(rest, pat)))
+
+def occurs(+s: String, +pat: String) -> Nat:
+  occurs.go(Nat.add(1n, String.length(s)), s, pat, String.contains(s, pat))
+
+# The text of lines lo..hi (1-indexed, inclusive) joined by newlines — the
+# exact bytes the file holds between those line boundaries, from the list the
+# raw read produced. Not the numbered page: the "N\t" prefixes are for Jev's
+# options, and the bytes applied must be the file's own.
+def window_text(+ls: List<&2, String>, +lo: Nat, +hi: Nat) -> String:
+  String.join(
+    List.take(&2, String,
+      List.drop(&2, String, ls, Nat.sub(lo, 1n)),
+      Nat.add(1n, Nat.sub(hi, lo))),
+    "\n")
+
+# The window grows one line in each direction per step until its bytes occur
+# exactly once in the file. tool_edit refuses a multi-match old_str anyway;
+# finding the unique slice here means that refusal stays a genuine surprise.
+# Radius cannot exceed the line count, so nlines+1 bounds the walk. `unique`
+# arrives as a parameter — a match cannot inspect the computed occurs call —
+# and each self-call computes it for the widened window.
+def unique_window.go(fuel: Nat, +ls: List<&2, String>, +line: Nat, +radius: Nat, +nlines: Nat, +file: String, +text: String, unique: Bool) -> Maybe<&2, String>:
+  match fuel unique:
+    case 0n _:
+      None{}
+    case _ True{}:
+      Some{text}
+    case 1n+f False{}:
+      +radius2 = Nat.add(radius, 1n)
+      +text2 = window_text(ls, Nat.max(1n, Nat.sub(line, radius2)), Nat.min(nlines, Nat.add(line, radius2)))
+      unique_window.go(f, ls, line, radius2, nlines, file, text2,
+        Nat.is_eq(occurs(file, text2), 1n))
+
+def unique_window(+ls: List<&2, String>, +line: Nat, +nlines: Nat, +file: String) -> Maybe<&2, String>:
+  +text = window_text(ls, line, line)
+  unique_window.go(Nat.add(1n, nlines), ls, line, 0n, nlines, file, text,
+    Nat.is_eq(occurs(file, text), 1n))
+
+# The reply is the replacement text itself; one trailing newline is a framing
+# artifact of the reply rather than intended content and is dropped.
+def extract_new_str(+reply: String) -> String:
+  Bool.pick(String,
+    String.ends_with(reply, "\n"),
+    String.take(reply, Nat.sub(String.length(reply), 1n)),
+    reply)
+
+def new_format_system() -> String:
+  "You are Bender, an autonomous coding agent improving your own repository.\nThe existing text to replace is given to you exactly. Reply with the replacement text and nothing else -- no prose, no code fences, no line numbers."
+
+# The anchor's line number must land inside the file it was picked from: a
+# line past the end would silently anchor the edit at the last line instead.
+def anchor_line_ok(+line: U32, +nlines: Nat) -> Bool:
+  Bool.and(U32.is_gt(line, 0), Bool.not(U32.is_gt(line, U32.from_nat(nlines))))
+
+# Every bail-out lands here: the anchor could not hold, so the edit falls
+# back to the sentinel draft, which still parses and applies the old way.
+def anchor_fallback(+reason: String, +state: String) -> IO(Progress):
+  do IO<Progress>:
+    u1 : Unit <- IO.print(color_yellow("   [anchor] " ++ reason ++ "; drafting the sentinel edit instead."))
+    draft_apply_edit(state)
+
+# The only generation the anchor path makes: the exact `old_str` is shown so
+# the model knows what it is replacing, and it writes `new_str` — genuinely
+# new text, the thing a generative model is for.
+def anchor_generate(+state: String, +path: String, +line: U32, +old_str: String) -> IO(Progress):
+  do IO<Progress>:
+    u1 : Unit <- IO.print(color_magenta("[TOOL GENERATE] Writing replacement text for " ++ path ++ " around line " ++ U32.show(line) ++ " ..."))
+    reply : String <- P.GenerateText(
+      "openai/gpt-oss-120b:nitro",
+      new_format_system(),
+      "State so far:\n" ++ state ++ "\n\nThe change anchors at line " ++ U32.show(line) ++ " of " ++ path ++ ". The exact existing text to replace is:\n" ++ old_str ++ "\nWrite the replacement text and nothing else.")
+    apply_block(path, old_str, extract_new_str(reply))
+
+def anchor_window.of(m: Maybe<&2, String>, +state: String, +path: String, +line: U32) -> IO(Progress):
+  match m:
+    case None{}:
+      anchor_fallback("no window around the anchor line is unique in the file", state)
+    case Some{+old_str}:
+      anchor_generate(state, path, line, old_str)
+
+def anchor_line(ok: Bool, +line: U32, +state: String, +path: String, +raw: String, +nlines: Nat) -> IO(Progress):
+  match ok:
+    case False{}:
+      anchor_fallback("the anchor named a line outside the file", state)
+    case True{}:
+      anchor_window.of(unique_window(String.lines(raw), U32.to_nat(line), nlines, raw), state, path, line)
+
+def anchor_apply(r: S.AnchorRoute, +state: String, +path: String, +raw: String, +nlines: Nat) -> IO(Progress):
+  match r:
+    case S.AnchorBack{+reason}:
+      anchor_fallback(reason, state)
+    case S.Anchor{+line}:
+      anchor_line(anchor_line_ok(line, nlines), line, state, path, raw, nlines)
+
+# The anchor step itself: one numbered page of the file goes to Jev as
+# options, the Choice picks a line id and the Noul says whether the file
+# holds the thing to change at all.
+def anchor_at(+state: String, +path: String, +raw: String, +nlines: Nat, +start: U32) -> IO(Progress):
+  do IO<Progress>:
+    u1 : Unit <- IO.print(color_magenta("[TOOL READ] Reading '" ++ path ++ "' from line " ++ U32.show(start) ++ " (anchor page) ..."))
+    page : String <- P.Read(path, start, U32.from_nat(S.anchor_page()))
+    +raw_a : String <- P.Classify(state, S.anchor_questions(path, page))
+    choice : P.Answer <- P.ParseAnswer(raw_a, "edit_anchor")
+    noul : P.Answer <- P.ParseAnswer(raw_a, "edit_present")
+    anchor_apply(S.anchor_route(choice, noul), state, path, raw, nlines)
+
+def anchor_window.pick(m: Maybe<&2, U32>, +state: String, +path: String, +raw: String, +nlines: Nat) -> IO(Progress):
+  match m:
+    case None{}:
+      anchor_fallback("the window Choice named no range of lines", state)
+    case Some{+start}:
+      anchor_at(state, path, raw, nlines, start)
+
+# A file that fits in one page of options needs no window pick: the anchor
+# Choice sees every line at once, as the cookbook's single-request search did.
+def anchor_window.need(+state: String, +path: String, +raw: String, +nlines: Nat, paged: Bool) -> IO(Progress):
+  match paged:
+    case False{}:
+      anchor_at(state, path, raw, nlines, 1)
+    case True{}:
+      do IO<Progress>:
+        u1 : Unit <- IO.print(color_magenta("[TOOL CLASSIFY] Picking a window of " ++ path ++ " ..."))
+        raw_w : String <- P.Classify(state, S.edit_window_questions(path, nlines, S.anchor_page()))
+        a : P.Answer <- P.ParseAnswer(raw_w, "edit_window")
+        anchor_window.pick(S.edit_window_pick(a), state, path, raw, nlines)
+
+def anchor_have_file.of(+state: String, +path: String, +raw: String, empty: Bool) -> IO(Progress):
+  match empty:
+    case True{}:
+      anchor_fallback(path ++ " is empty or could not be read", state)
+    case False{}:
+      +nlines = List.length(&2, String, String.lines(raw))
+      anchor_window.need(state, path, raw, nlines, Nat.is_gt(nlines, S.anchor_page()))
+
+def anchor_have_file(+state: String, +path: String) -> IO(Progress):
+  do IO<Progress>:
+    u1 : Unit <- IO.print(color_magenta("[TOOL READ] Reading '" ++ path ++ "' (anchor target) ..."))
+    +raw : String <- P.ReadFile(path)
+    anchor_have_file.of(state, path, raw, String.is_empty(raw))
+
+def anchor_file.pick(m: Maybe<&2, String>, +state: String) -> IO(Progress):
+  match m:
+    case None{}:
+      anchor_fallback("the file Choice named no file", state)
+    case Some{+path}:
+      anchor_have_file(state, path)
+
+def anchor_file(+state: String, +listing: String) -> IO(Progress):
+  do IO<Progress>:
+    u1 : Unit <- IO.print(color_magenta("[TOOL CLASSIFY] Picking the file to edit ..."))
+    raw_f : String <- P.Classify(state, S.edit_file_questions(listing))
+    a : P.Answer <- P.ParseAnswer(raw_f, "file_to_edit")
+    anchor_file.pick(S.edit_file_pick(a), state)
+
+def anchor_listing.of(r: Result<&1, &1, U32 & String, String>, +state: String) -> IO(Progress):
+  match r:
+    case Fail{e}:
+      (code, out) = e
+      anchor_fallback("the repository listing failed (exit " ++ U32.show(code) ++ ")", state)
+    case Done{+listing}:
+      anchor_file(state, listing)
+
+# do_apply_edit's anchor twin: the repository listing is the file Choice's
+# option set, the way do_read_code's picker already works.
+def anchor_apply_edit(+state: String) -> IO(Progress):
+  do IO<Progress>:
+    u1 : Unit <- IO.print(color_magenta("[TOOL EDIT] Anchoring the edit with a line-id Choice ..."))
+    r : Result<&1, &1, U32 & String, String> <- P.Exec("git ls-files 2>/dev/null || ls -1")
+    anchor_listing.of(r, state)
 
 # The action arrives already decoded: is_none keeps "none" (a real decision —
 # no listed action fits) distinct from None{} (a decision string no action
@@ -408,7 +603,7 @@ def dispatch_action(a: A.Action, state: String, misses: U32) -> IO(Progress):
     case A.RunBuild{}:
       act_run_build()
     case A.ApplyEdit{}:
-      draft_apply_edit(state)
+      anchor_apply_edit(state)
     case A.GenerateAnswer{}:
       act_generate_answer(state)
     case A.TaskComplete{}:

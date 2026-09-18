@@ -462,6 +462,168 @@ int main(void) {
   check(g7 && strncmp(g7, "No matches", 10) == 0, "tool_grep skips a binary file");
   free(g7);
 
+  // ----------------------------------------------------------------------
+  // The anchored edit: line ids, exact bytes, and the route to the fallback.
+  // ----------------------------------------------------------------------
+
+  // split_lines counts lines the way tool_read renders them: a trailing
+  // newline yields a final empty line, and spans keep their '\r' so the
+  // window's bytes stay the file's own.
+  const char* ltext = "one\ntwo\nthree\n";
+  long ln = 0;
+  LineSpan* ls = split_lines(ltext, strlen(ltext), &ln);
+  check(ls && ln == 4, "a trailing newline yields a final empty line");
+  check(ls && ls[0].len == 3 && ls[3].len == 0, "line spans carry their own lengths");
+  free(ls);
+  const char* noeol = "alpha\nbeta";
+  ls = split_lines(noeol, strlen(noeol), &ln);
+  check(ls && ln == 2, "no trailing newline means no trailing empty line");
+  check(ls && ls[1].len == 4, "the last span runs to the end of the buffer");
+  free(ls);
+
+  // window_text joins the exact bytes of a line range — the text the file
+  // holds between those boundaries, never a model's transcription of it.
+  ls = split_lines(ltext, strlen(ltext), &ln);
+  char* wt = window_text(ls, 1, 2);
+  check(wt && strcmp(wt, "one\ntwo") == 0, "a two-line window yields the file's exact bytes");
+  free(wt);
+  wt = window_text(ls, 3, 3);
+  check(wt && strcmp(wt, "three") == 0, "a one-line window is that line");
+  free(wt);
+
+  // occurs_in counts the way tool_edit's uniqueness check does, so a window
+  // that counts once here is accepted there.
+  check(occurs_in("dup\ndup\nuniq\n", "dup") == 2, "occurrences count non-overlapping matches");
+  check(occurs_in("dup\ndup\nuniq\n", "dup\ndup") == 1, "a wider window counts once");
+  check(occurs_in("anything", "") == 0, "an empty needle counts zero");
+  check(occurs_in("aaaa", "aa") == 2, "non-overlapping pairs, not overlapping ones");
+
+  // unique_window grows the anchor's window until its bytes occur exactly
+  // once: a unique line is taken alone, a duplicated one takes its
+  // neighbours, and the whole file is the last resort.
+  const char* dupfile = "dup\ndup\nuniq\ntail\n";
+  long dn = 0;
+  LineSpan* dl = split_lines(dupfile, strlen(dupfile), &dn);
+  char* uw = unique_window(dl, dn, 3, dupfile);
+  check(uw && strcmp(uw, "uniq") == 0, "a unique anchor line is its own window");
+  free(uw);
+  uw = unique_window(dl, dn, 1, dupfile);
+  check(uw && strcmp(uw, "dup\ndup") == 0, "a duplicated line widens until unique");
+  free(uw);
+  free(dl);
+  free(ls);
+
+  // A line id is all digits, matching U32.read on the Bend side.
+  long lid = 0;
+  check(parse_line_id("42", &lid) && lid == 42, "a numeric label parses");
+  check(!parse_line_id("+7", &lid), "a signed label does not parse");
+  check(!parse_line_id("-3", &lid), "a negative label does not parse");
+  check(!parse_line_id("7x", &lid), "a trailing character does not parse");
+  check(!parse_line_id("", &lid), "an empty label does not parse");
+
+  // jev_pick_label: only a confident, non-"none" Choice reads as a pick.
+  JevAnswer pc = { JEV_CHOSEN, "sys_c.c", 0.9, 0.0, 0.0 };
+  char* pl = jev_pick_label(pc, BENDER_EDIT_FILE_FLOOR);
+  check(pl && strcmp(pl, "sys_c.c") == 0, "a confident choice yields its label");
+  free(pl);
+  JevAnswer pn = { JEV_CHOSEN, "none", 0.9, 0.0, 0.0 };
+  check(jev_pick_label(pn, BENDER_EDIT_FILE_FLOOR) == NULL, "none is no pick");
+  JevAnswer plow = { JEV_CHOSEN, "sys_c.c", 0.1, 0.0, 0.0 };
+  check(jev_pick_label(plow, BENDER_EDIT_FILE_FLOOR) == NULL, "low confidence is no pick");
+  JevAnswer pms = { JEV_MISSING, "rate limited", 0.0, 0.0, 0.0 };
+  check(jev_pick_label(pms, BENDER_EDIT_FILE_FLOOR) == NULL, "a missing answer is no pick");
+
+  // anchor_route mirrors the Bend gate's row order: an unparseable label
+  // wins first, then absence over low confidence, and only a confident
+  // anchor over a present file keeps its line.
+  const char* ar_reason = NULL;
+  long ar_line = 0;
+  JevAnswer good_c = { JEV_CHOSEN, "7", 0.9, 0.0, 0.0 };
+  JevAnswer present = { JEV_NOULED, "", 0.0, 0.0, 0.95 };
+  JevAnswer absent = { JEV_NOULED, "", 0.0, 0.0, 0.05 };
+  check(anchor_route(good_c, present, &ar_line, &ar_reason) == 1 && ar_line == 7,
+        "a confident anchor over a present file keeps its line");
+  check(anchor_route(good_c, absent, &ar_line, &ar_reason) == 0 &&
+        strstr(ar_reason, "does not contain") != NULL,
+        "an absent file sends the edit back");
+  JevAnswer low_c = { JEV_CHOSEN, "7", 0.3, 0.0, 0.0 };
+  check(anchor_route(low_c, present, &ar_line, &ar_reason) == 0 &&
+        strstr(ar_reason, "not confident enough") != NULL,
+        "an under-floor anchor sends the edit back");
+  check(anchor_route(low_c, absent, &ar_line, &ar_reason) == 0 &&
+        strstr(ar_reason, "does not contain") != NULL,
+        "absence wins over low confidence");
+  JevAnswer bogus_c = { JEV_CHOSEN, "bogus", 0.9, 0.0, 0.0 };
+  check(anchor_route(bogus_c, present, &ar_line, &ar_reason) == 0 &&
+        strstr(ar_reason, "named no line") != NULL,
+        "an unparseable label sends the edit back");
+  check(anchor_route(bogus_c, absent, &ar_line, &ar_reason) == 0 &&
+        strstr(ar_reason, "named no line") != NULL,
+        "an unparseable label wins over absence");
+  JevAnswer missing_c = { JEV_MISSING, "rate limited", 0.0, 0.0, 0.0 };
+  check(anchor_route(missing_c, present, &ar_line, &ar_reason) == 0 &&
+        strstr(ar_reason, "rate limited") != NULL,
+        "a missing anchor sends the edit back with its reason");
+
+  // The line criteria are the cookbook's tags: each line's number is the
+  // option's label and its own text the description.
+  ls = split_lines(ltext, strlen(ltext), &ln);
+  FILE* lf = tmpfile();
+  int lopts = emit_line_criteria(lf, ls, 1, ln);
+  fflush(lf);
+  rewind(lf);
+  char lcrit[8192];
+  size_t lcrit_len = fread(lcrit, 1, sizeof(lcrit) - 1, lf);
+  lcrit[lcrit_len] = '\0';
+  fclose(lf);
+  check(lopts == 4, "one option per line of the window");
+  check(strstr(lcrit, "\"2\":\"two\"") != NULL, "a line's number labels its text");
+  check(strstr(lcrit, "\"4\":\"\"") != NULL, "the trailing empty line is still offered");
+  free(ls);
+
+  // The window criteria page the line ids under the Choice cap, labelled by
+  // the line each range starts at, with `none` kept for the escape hatch.
+  FILE* wf = tmpfile();
+  int wopts = emit_window_criteria(wf, 560, BENDER_ANCHOR_PAGE);
+  fflush(wf);
+  rewind(wf);
+  char wcrit[8192];
+  size_t wcrit_len = fread(wcrit, 1, sizeof(wcrit) - 1, wf);
+  wcrit[wcrit_len] = '\0';
+  fclose(wf);
+  check(wopts == 3, "560 lines is three 200-line windows");
+  check(strstr(wcrit, "\"1\":\"lines 1 to 200\"") != NULL, "the first window's label and range");
+  check(strstr(wcrit, "\"401\":\"lines 401 to 560\"") != NULL, "the last window stops at the file's end");
+  check(strstr(wcrit, "\"none\":") != NULL, "none is always offered");
+
+  // The edit file criteria offer real files with first-line descriptions,
+  // like the read picker's, but a file read to the end stays offerable —
+  // it is still a file the change can belong in.
+  FILE* ef = tmpfile();
+  int eopts = emit_edit_file_criteria(ef, "tools_c.h\nREADME.md\ndocs\n../escape\n");
+  fflush(ef);
+  rewind(ef);
+  char ecrit[8192];
+  size_t ecrit_len = fread(ecrit, 1, sizeof(ecrit) - 1, ef);
+  ecrit[ecrit_len] = '\0';
+  fclose(ef);
+  check(eopts == 2, "the edit picker offers the real files");
+  check(strstr(ecrit, "\"tools_c.h\":\"") != NULL, "an exhausted file is still an edit target");
+  check(strstr(ecrit, "\"docs\"") == NULL, "a directory is not an edit target");
+  check(strstr(ecrit, "escape") == NULL, "a path outside the repo is not an edit target");
+  check(strstr(ecrit, "\"none\":") != NULL, "none is always offered to the edit picker");
+
+  // extract_new_str drops the one trailing newline a reply frame adds.
+  char* ns = extract_new_str("int a = 2;\n");
+  check(ns && strcmp(ns, "int a = 2;") == 0, "one trailing newline is framing, dropped");
+  free(ns);
+  ns = extract_new_str("int a = 2;");
+  check(ns && strcmp(ns, "int a = 2;") == 0, "a reply without the newline is verbatim");
+  free(ns);
+  ns = extract_new_str("line one\nline two\n\n");
+  check(ns && strcmp(ns, "line one\nline two\n") == 0, "only the framing newline is dropped");
+  free(ns);
+
   printf("\n%d failure(s)\n", fails);
   return fails != 0;
 }
