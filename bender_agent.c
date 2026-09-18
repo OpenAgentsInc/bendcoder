@@ -5,9 +5,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <unistd.h>
 #include <sys/wait.h>
 #include <ctype.h>
+#include <time.h>
 
 // Read / Write / Edit, shared with the Bend FFI layer in sys_c.c.
 #include "tools_c.h"
@@ -80,6 +82,32 @@ static const char* get_api_key(const char* env_var, const char* file_path, char*
   return NULL;
 }
 
+// The contract marks 429 (rate limited) and 529 (overloaded) retryable and
+// answers them with retry-after-ms, which wins over Retry-After — itself either
+// seconds or an HTTP date, and only the numeric form is read. With neither
+// header the wait backs off exponentially from half a second, capped so a
+// stray header cannot stall the loop for hours. See #32.
+#define BENDER_TS_MAX_ATTEMPTS 4
+#define BENDER_TS_MAX_WAIT_MS 30000
+
+static long classify_retry_wait_ms(const char* header_path, int attempt) {
+  long wait_ms = -1;
+  long retry_after_s = -1;
+  FILE* hf = fopen(header_path, "r");
+  if (hf) {
+    char line[512];
+    while (fgets(line, sizeof(line), hf)) {
+      if (strncasecmp(line, "retry-after-ms:", 15) == 0) wait_ms = atol(line + 15);
+      else if (strncasecmp(line, "retry-after:", 12) == 0) retry_after_s = atol(line + 12);
+    }
+    fclose(hf);
+  }
+  if (wait_ms < 0 && retry_after_s > 0) wait_ms = retry_after_s * 1000;
+  if (wait_ms < 0) wait_ms = 500L << attempt;
+  if (wait_ms > BENDER_TS_MAX_WAIT_MS) wait_ms = BENDER_TS_MAX_WAIT_MS;
+  return wait_ms;
+}
+
 // Call TypeSafe System One
 static char* call_typesafe_classify(const char* state_str) {
   char key_buf[256];
@@ -121,16 +149,55 @@ static char* call_typesafe_classify(const char* state_str) {
     fclose(pf);
   }
 
-  char cmd[4096];
-  snprintf(cmd, sizeof(cmd),
-    "curl -s -X POST https://api.typesafe.ai/v1/systemone "
-    "-H 'Authorization: Bearer %s' "
-    "-H 'Content-Type: application/json' "
-    "-d @%s",
-    key, tmp_payload);
+  // Status and headers are captured apart from the body: 429/529 need the
+  // headers to know how long to wait, and any failure needs its status and body
+  // logged — an unparseable response already halts the loop, but without this
+  // there is no way to tell a rate limit from a 422 or a malformed reply.
+  char hdr_path[] = "/tmp/bender_ts_hdr_XXXXXX";
+  char body_path[] = "/tmp/bender_ts_body_XXXXXX";
+  int hfd = mkstemp(hdr_path);
+  int bfd = mkstemp(body_path);
+  if (hfd < 0 || bfd < 0) {
+    if (hfd >= 0) close(hfd);
+    if (bfd >= 0) close(bfd);
+    unlink(tmp_payload);
+    return strdup("{}");
+  }
+  close(hfd);
+  close(bfd);
 
-  char* resp = exec_cmd(cmd);
+  int status = 0;
+  int attempt;
+  for (attempt = 1; attempt <= BENDER_TS_MAX_ATTEMPTS; attempt++) {
+    char cmd[4096];
+    snprintf(cmd, sizeof(cmd),
+      "curl -s -X POST https://api.typesafe.ai/v1/systemone "
+      "-H 'Authorization: Bearer %s' "
+      "-H 'Content-Type: application/json' "
+      "-D %s -o %s -w '%%{http_code}' "
+      "-d @%s",
+      key, hdr_path, body_path, tmp_payload);
+    char* code = exec_cmd(cmd);
+    status = atoi(code);
+    free(code);
+    if ((status != 429 && status != 529) || attempt == BENDER_TS_MAX_ATTEMPTS) break;
+    long wait_ms = classify_retry_wait_ms(hdr_path, attempt - 1);
+    fprintf(stderr, "%s[typesafe] HTTP %d; retrying in %ld ms (attempt %d of %d)%s\n",
+            ANSI_YELLOW, status, wait_ms, attempt + 1, BENDER_TS_MAX_ATTEMPTS, ANSI_RESET);
+    struct timespec ts = { wait_ms / 1000, (wait_ms % 1000) * 1000000L };
+    nanosleep(&ts, NULL);
+  }
+
+  char* resp = bender_slurp(body_path, NULL);
+  if (!resp) resp = strdup("{}");
+  if (status < 200 || status >= 300) {
+    fprintf(stderr, "%s[typesafe] classify failed: HTTP %d after %d attempt(s); body: %.400s%s\n",
+            ANSI_YELLOW, status, attempt, resp, ANSI_RESET);
+  }
+
   unlink(tmp_payload);
+  unlink(hdr_path);
+  unlink(body_path);
   return resp;
 }
 
