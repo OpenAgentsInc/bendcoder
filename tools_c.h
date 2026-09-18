@@ -267,6 +267,46 @@ static char* tool_write(const char* path, const char* content, size_t len) {
     : bender_fmt("File created successfully at: %s", path);
 }
 
+// A model that has just read a file through Read sees "N\tline" and routinely
+// quotes that numbering back when it writes an old_string, dropping the number
+// but keeping the tab. Strips a leading line-number prefix from each line so
+// such an old_string can still be matched against the file. Only ever used as
+// a fallback after the exact string fails, and only kept when it resolves.
+static char* bender_strip_line_prefixes(const char* s, int* changed) {
+  size_t len = strlen(s);
+  char* out = (char*)malloc(len + 1);
+  if (!out) return NULL;
+  size_t o = 0;
+  int any = 0;
+  size_t i = 0;
+  while (i <= len) {
+    // Measure this line.
+    size_t line_end = i;
+    while (line_end < len && s[line_end] != '\n') line_end++;
+
+    size_t j = i;
+    size_t digits = 0;
+    while (j < line_end && s[j] >= '0' && s[j] <= '9') { j++; digits++; }
+    if (digits > 0 && j < line_end && (s[j] == '\t' || s[j] == ':')) {
+      i = j + 1;          // "26\t" or "26:"
+      any = 1;
+    } else if (i < line_end && s[i] == '\t') {
+      i = i + 1;          // the number already dropped, the tab left behind
+      any = 1;
+    }
+
+    size_t keep = line_end - i;
+    memcpy(out + o, s + i, keep);
+    o += keep;
+    if (line_end < len) out[o++] = '\n';
+    i = line_end + 1;
+    if (line_end >= len) break;
+  }
+  out[o] = '\0';
+  if (changed) *changed = any;
+  return out;
+}
+
 // ----------------------------------------------------------------------------
 // Edit
 // ----------------------------------------------------------------------------
@@ -301,8 +341,29 @@ static char* tool_edit(const char* path, const char* old_str, const char* new_st
   if (!content) return bender_fmt("error: Failed to read %s", path);
 
   size_t matches = bender_count_matches(content, old_str);
+
+  // The exact string is authoritative. Only when it is absent is the
+  // line-number-stripped spelling tried, and only if that one resolves.
+  char* stripped = NULL;
   if (matches == 0) {
-    char* err = bender_fmt("error: String to replace not found in %s.\nString: %s", path, old_str);
+    int changed = 0;
+    stripped = bender_strip_line_prefixes(old_str, &changed);
+    if (stripped && changed) {
+      size_t stripped_matches = bender_count_matches(content, stripped);
+      if (stripped_matches > 0) {
+        old_str = stripped;
+        matches = stripped_matches;
+      }
+    }
+  }
+
+  if (matches == 0) {
+    char* err = bender_fmt(
+      "error: String to replace not found in %s. Line-number prefixes were "
+      "stripped and it still did not match, so copy the text exactly as it "
+      "appears in the file, without the \"N<tab>\" Read adds.\nString: %s",
+      path, old_str);
+    free(stripped);
     free(content);
     return err;
   }
@@ -312,6 +373,7 @@ static char* tool_edit(const char* path, const char* old_str, const char* new_st
       "To replace all occurrences set replace_all to true. To replace one occurrence, "
       "provide more context to uniquely identify the instance.\nString: %s",
       matches, path, old_str);
+    free(stripped);
     free(content);
     return err;
   }
@@ -342,6 +404,7 @@ static char* tool_edit(const char* path, const char* old_str, const char* new_st
                                  replace_all ? 0 : 1, &updated_len);
   free(content);
   free(search_owned);
+  free(stripped);
   if (!updated) return strdup("error: out of memory");
 
   char* err = bender_write_bytes(path, updated, updated_len);
@@ -353,4 +416,66 @@ static char* tool_edit(const char* path, const char* old_str, const char* new_st
     : bender_fmt("The file %s has been updated successfully.", path);
 }
 
+static char* tool_grep(const char* pattern, const char* path) {
+    if (bender_is_dir(path)) {
+        return bender_fmt("error: EISDIR: illegal operation on a directory, grep '%s'", path);
+    }
+    size_t len = 0;
+    char* content = bender_slurp(path, &len);
+    if (!content) return bender_fmt("error: Failed to open %s for reading", path);
+
+    char* result = NULL;
+    size_t result_cap = 0;
+    size_t result_len = 0;
+    size_t line_no = 1;
+    char* ptr = content;
+
+    while (ptr && *ptr) {
+        char* nl = strchr(ptr, '\n');
+        size_t line_len = nl ? (size_t)(nl - ptr) : strlen(ptr);
+        if (line_len > 0 && ptr[line_len - 1] == '\r') line_len--;  // strip CR
+
+        // duplicate the line for easy searching
+        char* line = strndup(ptr, line_len);
+        if (!line) {
+            free(result);
+            free(content);
+            return strdup("error: out of memory");
+        }
+
+        if (strstr(line, pattern)) {
+            // ensure enough space
+            size_t needed = result_len + 20 + line_len + 2;
+            if (needed > result_cap) {
+                result_cap = needed * 2;
+                char* tmp = (char*)realloc(result, result_cap);
+                if (!tmp) {
+                    free(line);
+                    free(result);
+                    free(content);
+                    return strdup("error: out of memory");
+                }
+                result = tmp;
+            }
+            int n = snprintf(result + result_len, result_cap - result_len, "%zu:%.*s\n",
+                             line_no, (int)line_len, ptr);
+            result_len += (size_t)n;
+        }
+
+        free(line);
+        line_no++;
+        if (!nl) break;
+        ptr = nl + 1;
+    }
+
+    free(content);
+    if (!result) {
+        return strdup("<system-reminder>No matches found for pattern.</system-reminder>");
+    }
+    // trim trailing newline
+    if (result_len > 0 && result[result_len - 1] == '\n') {
+        result[result_len - 1] = '\0';
+    }
+    return result;
+}
 #endif  // BENDER_TOOLS_C_H

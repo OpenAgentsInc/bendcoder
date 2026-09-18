@@ -84,6 +84,28 @@ int main(void) {
   check(r2 && strcmp(r2, "1\tone\n2\tTWO\n3\tthree\n4\t") == 0, "file content after edit");
   free(r2);
 
+  // Read renders "N\tline", and a model quoting that back writes an old_string
+  // the file does not contain. Edit has to recover from that or it can never
+  // change a file it just read.
+  char* e4 = tool_edit(tmp, "3\tthree", "THREE", 0);
+  check(strncmp(e4, "The file", 8) == 0, "tool_edit strips an N<tab> line-number prefix");
+  free(e4);
+  char* e5 = tool_edit(tmp, "\tTHREE", "three", 0);
+  check(strncmp(e5, "The file", 8) == 0, "tool_edit strips a leftover leading tab");
+  free(e5);
+  char* e6 = tool_edit(tmp, "12:absent", "x", 0);
+  check(strncmp(e6, "error:", 6) == 0, "stripping does not invent a match that is not there");
+  free(e6);
+  // The exact text must still win over the stripped reading.
+  char* w2 = tool_write(tmp, "one\nTWO\nthree\n9\tnine\n", 22);
+  free(w2);
+  char* e7 = tool_edit(tmp, "9\tnine", "NINE", 0);
+  check(strncmp(e7, "The file", 8) == 0, "an exact match that looks numbered is taken literally");
+  free(e7);
+  char* r3 = tool_read(tmp, 4, 1);
+  check(r3 && strcmp(r3, "4\tNINE") == 0, "the literal line was replaced, not a stripped one");
+  free(r3);
+
   printf("\n%d failure(s)\n", fails);
   return fails != 0;
 }
