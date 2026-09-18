@@ -63,8 +63,8 @@ Read README.md first: it documents Bend 2.0.5's constraints, which are not the
 ones you will expect. Bend is affine, has no forward references, and its
 self-calls must structurally decrease.
 
-Verify with ./run_tests.sh before you finish. Do not commit; leave the change
-in the working tree.
+Verify with ./run_tests.sh before you finish. Do not commit: the harness
+commits for you, so that the branch carries the work and can be merged.
 PROMPTEOF
 
   ( cd "$wt" && timeout 2400 devin -p --prompt-file "/tmp/devin_prompt_$issue.md" \
@@ -81,7 +81,17 @@ PROMPTEOF
   else
     tests="FAIL"
   fi
-  echo "#$issue: $tests  $(cd "$wt" && git diff --shortstat)  [$wt]"
+
+  # Commit on the branch. Without this the work stays uncommitted in the
+  # worktree, the branch has no new commits, and `git merge` of it reports
+  # "Already up to date" and silently brings nothing across.
+  local stat
+  stat="$(cd "$wt" && git diff --shortstat HEAD)"
+  ( cd "$wt" && git add -A && git commit -q \
+      -m "Devin: work on #$issue" \
+      -m "Delegated by delegate-batch.sh. Suite result at commit time: $tests." )
+
+  echo "#$issue: $tests  $stat  [branch devin/issue-$issue]"
 }
 
 echo "Delegating to Devin in parallel worktrees under $WT_ROOT"
