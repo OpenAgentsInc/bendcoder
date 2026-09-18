@@ -59,6 +59,22 @@ int main(void) {
   free(s3);
   check(extract_search_pattern("   \n  \n") == NULL, "blank reply yields no pattern");
 
+  // Jev's answers share field names, so an unscoped search for "noul" returns
+  // whichever question came first and silently discards the rest.
+  const char* answers =
+    "{\"model\":\"jev-1.13.0\",\"answers\":{"
+    "\"action\":{\"type\":\"choice\",\"choice\":\"read_code\",\"confidence\":0.67},"
+    "\"has_enough_info\":{\"type\":\"noul\",\"noul\":0.1},"
+    "\"needs_code_change\":{\"type\":\"noul\",\"noul\":0.9},"
+    "\"repeats\":{\"type\":\"noul\",\"noul\":0.75},"
+    "\"confidence_score\":{\"type\":\"score\",\"score\":0.45,\"confidence\":0.33}}}";
+  check(extract_number(answers, "has_enough_info", "\"noul\":") == 0.1, "first Noul read");
+  check(extract_number(answers, "needs_code_change", "\"noul\":") == 0.9, "second Noul read, not the first");
+  check(extract_number(answers, "repeats", "\"noul\":") == 0.75, "third Noul read");
+  check(extract_number(answers, "action", "\"confidence\":") == 0.67, "the Choice's own confidence");
+  check(extract_number(answers, "confidence_score", "\"confidence\":") == 0.33, "the Score's own confidence");
+  check(extract_number(answers, "absent_question", "\"noul\":") == 0.0, "a missing question reads zero");
+
   check(path_is_in_repo("sys_c.c"), "relative path allowed");
   check(!path_is_in_repo("/etc/passwd"), "absolute path refused");
   check(!path_is_in_repo("../secrets"), "parent traversal refused");

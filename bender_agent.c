@@ -113,6 +113,7 @@ static char* call_typesafe_classify(const char* state_str) {
         "\"none\":\"No listed action fits: the state does not yet support a next step\"}},"
       "\"has_enough_info\":{\"type\":\"noul\",\"instructions\":\"Does the current state have enough concrete information to directly answer the user prompt?\"},"
       "\"needs_code_change\":{\"type\":\"noul\",\"instructions\":\"Does satisfying this goal require editing files in this repository, rather than only answering in prose?\"},"
+      "\"repeats\":{\"type\":\"noul\",\"instructions\":\"Would the next action repeat something the state already records having tried without success?\"},"
       "\"confidence_score\":{\"type\":\"score\",\"instructions\":\"How confident are we that we can answer or finish now?\","
       "\"criteria\":[\"0: Need more information from files or commands\",\"1: Partially understood\",\"2: Fully ready to answer or complete\"]}"
     "}}", pf);
@@ -251,14 +252,23 @@ static char* extract_content(const char* json) {
   return out;
 }
 
-// Extract field value for compact logging
-static double extract_number(const char* json, const char* key) {
+// Reads one numeric field of one question's answer. Scoped by question id
+// because the answers share field names: with more than one Noul in a request,
+// an unscoped search for "noul" always returns the first one and every later
+// question is silently discarded. See #27.
+static double extract_number(const char* json, const char* qid, const char* key) {
   if (!json) return 0.0;
-  const char* p = strstr(json, key);
+  char needle[128];
+  snprintf(needle, sizeof(needle), "\"%s\"", qid);
+  const char* p = strstr(json, needle);
   if (!p) return 0.0;
-  p += strlen(key);
-  while (*p && (*p == ' ' || *p == ':' || *p == '\"')) p++;
-  return strtod(p, NULL);
+  // Stop at the next question so a missing field cannot read its neighbour's.
+  const char* next = strstr(p + strlen(needle), "},\"");
+  const char* found = strstr(p, key);
+  if (!found || (next && found > next)) return 0.0;
+  found += strlen(key);
+  while (*found && (*found == ' ' || *found == ':' || *found == '\"')) found++;
+  return strtod(found, NULL);
 }
 
 // -----------------------------------------------------------------------------
@@ -683,6 +693,16 @@ int main(int argc, char** argv) {
   int read_phase = 0;
   // Read, edit, verify and retry does not fit in the six steps an answer takes.
   // BENDER_MAX_STEPS raises the ceiling for a longer self-improvement run.
+  // Thresholds, together and named, rather than scattered through the dispatch.
+  // The floor comes from measurement, not taste: across the delegation runs,
+  // productive steps sat at 0.55 and above while runs that flailed for ten
+  // steps and landed nothing sat between 0.21 and 0.43. See #33.
+  const double CONFIDENCE_FLOOR = 0.45;
+  const double REPEATS_FLOOR = 0.60;
+  const int MAX_LOW_CONFIDENCE = 3;
+
+  int low_confidence_run = 0;
+  char last_decision[64] = "";
   int max_steps = 6;
   const char* steps_env = getenv("BENDER_MAX_STEPS");
   if (steps_env && steps_env[0]) {
@@ -695,9 +715,11 @@ int main(int argc, char** argv) {
     // 1. Classify
     char* c_resp = call_typesafe_classify(state);
     char* decision = extract_choice(c_resp, "action");
-    double conf = extract_number(c_resp, "\"confidence\":");
-    double score = extract_number(c_resp, "\"score\":");
-    double noul = extract_number(c_resp, "\"noul\":");
+    double conf = extract_number(c_resp, "action", "\"confidence\":");
+    double score = extract_number(c_resp, "confidence_score", "\"score\":");
+    double noul = extract_number(c_resp, "has_enough_info", "\"noul\":");
+    double needs_change = extract_number(c_resp, "needs_code_change", "\"noul\":");
+    double repeats = extract_number(c_resp, "repeats", "\"noul\":");
 
     // Guardrail: Only override generate_answer to read_code if we haven't read any code yet (read_phase == 0).
     // Once code has been read, trust generate_answer and do not trap the agent in an infinite read loop.
@@ -720,10 +742,41 @@ int main(int argc, char** argv) {
       decision = strdup("generate_answer");
     }
 
-    printf("🧠 %sAction Selected:%s %s%-16s%s %s(conf: %.2f, info_prob: %.2f, score: %.2f)%s\n",
+    printf("🧠 %sAction Selected:%s %s%-16s%s %s(conf: %.2f, info: %.2f, score: %.2f, "
+           "needs_change: %.2f, repeats: %.2f)%s\n",
       ANSI_BOLD, ANSI_RESET,
       ANSI_YELLOW, decision, ANSI_RESET,
-      ANSI_DIM, conf, noul, score, ANSI_RESET);
+      ANSI_DIM, conf, noul, score, needs_change, repeats, ANSI_RESET);
+
+    // A repeat of something already tried without success is worth one nudge,
+    // not another attempt. Seven identical search_code selections in ten steps
+    // is what this exists to stop.
+    if (repeats > REPEATS_FLOOR && strcmp(decision, last_decision) == 0 &&
+        strcmp(decision, "task_complete") != 0) {
+      printf("🔁 %sJev reports this repeats a failed attempt (%.2f); reading instead.%s\n",
+             ANSI_YELLOW, repeats, ANSI_RESET);
+      state_append(state, sizeof(state), "Repetition avoided",
+        "The last action was about to be repeated after failing. Try a different approach.");
+      free(decision);
+      decision = strdup("read_code");
+    }
+
+    // Jev saying, step after step, that it does not know. Acting on it anyway
+    // is how a run burns its whole budget and lands nothing.
+    if (conf < CONFIDENCE_FLOOR) {
+      low_confidence_run++;
+    } else {
+      low_confidence_run = 0;
+    }
+    if (low_confidence_run >= MAX_LOW_CONFIDENCE) {
+      printf("🛑 %s%d steps below the confidence floor (%.2f); stopping rather than flailing.%s\n",
+             ANSI_YELLOW, low_confidence_run, CONFIDENCE_FLOOR, ANSI_RESET);
+      free(c_resp);
+      free(decision);
+      break;
+    }
+
+    snprintf(last_decision, sizeof(last_decision), "%s", decision);
 
     // 2. Dispatch
     if (decision[0] == '\0') {
