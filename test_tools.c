@@ -129,6 +129,23 @@ int main(void) {
   check(!path_is_in_repo("a/../../b"), "embedded traversal refused");
   check(!path_is_in_repo(""), "empty path refused");
 
+  // The coverage manifest run_tests.sh ends with is what lets apply_edit tell
+  // a real verification from a green run over a file nothing checks (#22).
+  const char* cov_out =
+    "== suite coverage ==\n"
+    "COVERED: README.md\n"
+    "COVERED: bender_agent.c\n"
+    "COVERED: tools_c.h\n"
+    "All checks passed.\n";
+  check(suite_covers(cov_out, "tools_c.h") == 1, "a file in the manifest reads as covered");
+  check(suite_covers(cov_out, "README.md") == 1, "the manifest's first entry reads as covered");
+  check(suite_covers(cov_out, "LICENSE") == 0, "a file outside the manifest reads as uncovered");
+  check(suite_covers(cov_out, "tools_c") == 0, "a prefix of a covered name is not covered");
+  check(suite_covers(cov_out, "./tools_c.h") == 1, "a ./ prefix still resolves against the manifest");
+  check(suite_covers("All checks passed.\n", "tools_c.h") == -1,
+        "output with no manifest reads as unknown coverage");
+  check(suite_covers(NULL, "tools_c.h") == -1, "a NULL output has no manifest");
+
   char state[256];
   strcpy(state, "start");
   char big[9000];

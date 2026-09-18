@@ -517,11 +517,26 @@ static void state_append(char* state, size_t cap, const char* label, const char*
 
 // The command that decides whether an edit was good. run_tests.sh covers the
 // file tools, the agent's helpers and the Bend side; BENDER_VERIFY_CMD points
-// the loop at a different suite when a goal calls for one.
+// the loop at a different suite when a goal calls for one. A suite that ends
+// its output with one "COVERED: <path>" line per file it exercises lets
+// apply_edit tell a real pass from a green run that read nothing relevant.
 static const char* verify_command(void) {
   const char* cmd = getenv("BENDER_VERIFY_CMD");
   if (cmd && cmd[0]) return cmd;
   return "./run_tests.sh";
+}
+
+// Whether the verify output's coverage manifest names `path`: 1 when it does,
+// 0 when a manifest is present but does not, -1 when the output carries no
+// manifest at all. A pass is only evidence about the files the suite reads —
+// run_tests.sh emits the manifest precisely so an edit landing outside it is
+// reported as the weaker thing it is rather than as verification. See #22.
+static int suite_covers(const char* verify_out, const char* path) {
+  if (!verify_out || !strstr(verify_out, "COVERED: ")) return -1;
+  while (path[0] == '.' && path[1] == '/') path += 2;
+  char needle[512];
+  snprintf(needle, sizeof(needle), "COVERED: %s\n", path);
+  return strstr(verify_out, needle) != NULL;
 }
 
 // An agent editing its own repository must not wander out of it. Paths are
@@ -893,8 +908,27 @@ static void do_apply_edit(char* state, size_t cap, const char* goal) {
   int status = -1;
   char* out = exec_cmd_status(verify_command(), &status);
   if (status == 0) {
-    printf("✅ %sVerification passed.%s\n", ANSI_GREEN, ANSI_RESET);
-    state_append(state, cap, "Verification passed", out);
+    // A green suite is only evidence about the files it reads. The manifest
+    // run_tests.sh prints (one COVERED: line per exercised file) is checked
+    // for the file just edited; a pass over a file no check reads is reported
+    // as the weaker thing it is rather than claimed as verification. See #22.
+    int covered = suite_covers(out, path);
+    if (covered == 1) {
+      printf("✅ %sVerification passed.%s\n", ANSI_GREEN, ANSI_RESET);
+      state_append(state, cap, "Verification passed", out);
+    } else {
+      char label[512];
+      if (covered == 0) {
+        snprintf(label, sizeof(label),
+          "Verification passed, but nothing in the suite exercises %s", path);
+      } else {
+        snprintf(label, sizeof(label),
+          "Verification passed, but the suite reported no coverage manifest — "
+          "whether it exercises %s is unknown", path);
+      }
+      printf("⚠️  %s%s.%s\n", ANSI_YELLOW, label, ANSI_RESET);
+      state_append(state, cap, label, out);
+    }
   } else {
     printf("❌ %sVerification failed (exit %d) — rolling the file back.%s\n",
            ANSI_YELLOW, status, ANSI_RESET);

@@ -80,7 +80,12 @@ Classify -> Generate an edit -> Edit applies it -> verify -> pass? keep : roll b
   because an edit carries exact source text and sentinels survive the quotes,
   braces and newlines a JSON string has to escape.
 - **Verify.** `./run_tests.sh` by default; set `BENDER_VERIFY_CMD` to point the
-  loop at a different suite.
+  loop at a different suite. The suite ends by printing a `COVERED: <path>`
+  line for every file it exercises; a pass over a file absent from that list is
+  reported as "verification passed, but nothing in the suite exercises it",
+  not as a clean pass — a green run only says something about the files the
+  suite actually reads. A custom verify command can print the same lines to
+  take part.
 - **Roll back.** The file is snapshotted before the edit and restored when
   verification fails, so a bad patch never leaves the tree broken — the failure
   goes back into the state and the next `Classify` round sees it.
@@ -108,8 +113,13 @@ BENDER_MAX_STEPS=8 ./run_bender.sh "Add a greet_bender function to hello.bend, k
 ```
 
 Covers the file tools, the agent's edit-block parser and path guard, and checks
-that the C runtime compiles and both Bend programs still check and build. This
-is also the loop's default verification target.
+that the C runtime compiles and both Bend programs still check and build —
+with warnings as errors on the repository's own C and on every section of the
+FFI shims, a `bash -n` over the scripts, a structural check on the markdown
+(fences balanced, no section break splitting an introduction from its block),
+and `call_typesafe.bend` compiled. This is also the loop's default
+verification target, and it reports what it covered; see the `COVERED:` note
+under Verify above.
 
 ## Two agents
 
@@ -233,7 +243,7 @@ a failed request — which every consumer matches on.
 
 ## API Keys & Configuration
 
-Both keys are git-ignored and can be set in files or environment variables:
+Both keys are git-ignored and can be set in files or environment variables.
 
 ### 1. TypeSafe System One (for `Classify`)
 - **File:** `.env.typesafe` (template: `.env.typesafe.example`)
