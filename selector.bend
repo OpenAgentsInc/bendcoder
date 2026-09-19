@@ -300,6 +300,17 @@ def floor_out(a: A.Action) -> Route:
 # unchecked item rather than letting the model re-derive orientation from the
 # issue text, and `item` is the hunk the reason names. Only a task_complete
 # sets it, so it cannot block the work itself.
+# An open plan item gates finishing, not working. Routing it on `unfin` alone
+# rerouted every action, including the edits that would discharge the item --
+# which is what Selector.open_plan_acts caught. `a` cannot join the match's
+# scrutinees without a tenth column on every row, so the row hands it here.
+def plan_gate(a: A.Action, +item: String) -> Route:
+  match a:
+    case A.TaskComplete{}:
+      Reread{"the plan still lists '" ++ item ++ "' unchecked; work the plan rather than finishing"}
+    case other:
+      Act{other}
+
 def route.gate(under: Bool, spent: Bool, rep: Bool, risky: Bool, stuck: Bool, blind_edit: Bool, blind_answer: Bool, read_dead: Bool, unfin: Bool, +item: String, a: A.Action) -> Route:
   match under spent rep risky stuck blind_edit blind_answer read_dead unfin:
     case _ _ _ _ _ _ _ True{} _:
@@ -319,7 +330,7 @@ def route.gate(under: Bool, spent: Bool, rep: Bool, risky: Bool, stuck: Bool, bl
     case _ _ _ _ _ _ True{} _ _:
       Reread{"too little information to answer and nothing read yet; reading first"}
     case _ _ _ _ _ _ _ _ True{}:
-      Reread{"the plan still lists '" ++ item ++ "' unchecked; work the plan rather than finishing"}
+      plan_gate(a, item)
     case _ _ _ _ _ _ _ _ _:
       Act{a}
 

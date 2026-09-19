@@ -21,7 +21,9 @@ type Item is Data:
 # Whether `text` names an element of `xs` — the item's file appearing in the
 # changed list (mark) or the repository listing (open). List.contains's `eq`
 # sees (element, query), so the arguments arrive flipped from contains's.
-def named_by(+p: String, +text: String) -> Bool:
+# Plain parameters, not `+`: List.contains wants `A -> A -> Bool`, and a
+# reusable-parameter function is a different type. Each is used once anyway.
+def named_by(p: String, text: String) -> Bool:
   String.contains(text, p)
 
 def names(+text: String, +xs: List<&2, String>) -> Bool:
