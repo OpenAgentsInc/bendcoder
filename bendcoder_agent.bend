@@ -5,6 +5,7 @@ import ./parse.bend as E
 import ./ui.bend as U
 import ./selector.bend as S
 import ./reads.bend as R
+import ./terms.bend as T
 
 # ==============================================================================
 # Bendcoder: Autonomous Coding Agent Loop
@@ -217,6 +218,29 @@ def search_with(+pattern: String, +book: R.Book) -> IO(Progress):
     u1 : Unit <- IO.print(U.color_magenta("[TOOL SEARCH] Searching for '") ++ pattern ++ U.color_magenta("' ..."))
     hits : String <- P.Grep(pattern, ".")
     search_report(pattern, hits, book)
+
+# The sniff: each term the goal yielded is grepped once and folded into the
+# state by the same rep.search/apply_report pair a real search_code uses, so
+# the label "Search for 't'" lands in the observations (the re-proposal check
+# suppresses a later identical search) and the hits land under
+# index.search_hits. The Book is untouched — the model did not choose these
+# searches, so a miss here is not its miss. Runs before step 1; a goal with
+# no usable terms runs nothing.
+def sniff_run(ts: List<&2, String>, +state: P.State, +left: U32) -> IO(P.State):
+  match ts:
+    case Nil{}:
+      IO.pure(P.State, state)
+    case +t <> rest:
+      do IO<P.State>:
+        u1 : Unit <- IO.print(U.color_magenta("[TOOL SEARCH] Searching for '") ++ t ++ U.color_magenta("' ..."))
+        +hits : String <- P.Grep(t, ".")
+        u2 : Unit <- IO.print(U.color_yellow("   Search for '" ++ t ++ "'"))
+        u3 : Unit <- IO.print("   " ++ hits)
+        sniff_run(rest,
+          apply_report(state,
+            rep.search("Search for '" ++ t ++ "'", t ++ ":\n" ++ hits, t ++ ":\n" ++ hits),
+            left),
+          left)
 
 # A pattern already run is in the state with its result, so proposing it again
 # is a failed search without even grepping: skipped, but counted all the same.
@@ -1001,7 +1025,12 @@ def run_agent(+fuel: Nat, +goal: String) -> IO(Unit):
       U.color_magenta("[INDEX] ") ++
       Nat.show(List.length(&2, String, paths)) ++
       " repository paths injected into the state.")
-    agent_step(fuel, Running{rep.empty(), R.book.new()}, 1, P.state.new(goal, paths, U32.from_nat(fuel)))
+    +sniffed : List<&2, String> = T.terms(goal)
+    u5 : Unit <- IO.print(Bool.pick(String, List.is_empty(&2, String, sniffed),
+      "",
+      U.color_magenta("[SNIFF] ") ++ String.join(sniffed, ", ")))
+    s1 : P.State <- sniff_run(sniffed, P.state.new(goal, paths, U32.from_nat(fuel)), U32.from_nat(fuel))
+    agent_step(fuel, Running{rep.empty(), R.book.new()}, 1, s1)
 
 # BENDCODER_MAX_STEPS raises the ceiling for a longer run — a non-positive or
 # unparseable value leaves the default, atoi's "0 means no override" reading.

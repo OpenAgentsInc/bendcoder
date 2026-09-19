@@ -274,6 +274,10 @@ Example run session:
 [GOAL] Initial Goal: Report which file defines the grep match cap. Do not edit any files.
 
 [INDEX] 37 repository paths injected into the state.
+[SNIFF] grep, match
+[TOOL SEARCH] Searching for 'grep' ...
+   Search for 'grep'
+   ...
 --------------------------------------------------------------------------------
 [STEP 1] Evaluating State with Classify (TypeSafe System One)...
 --------------------------------------------------------------------------------

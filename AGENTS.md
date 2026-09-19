@@ -112,6 +112,7 @@ worktree because a fresh checkout has none — env-var keys do not need that.
 - `selector.bend` — the Jev question set, thresholds, route table (`S.`)
 - `action.bend` — the `Action` type (`A.`); `parse.bend` — edit/result parsers (`E.`)
 - `reads.bend` — the loop's `Book`: read cursors, pending read, miss/low runs (`R.`)
+- `terms.bend` — pure goal-term extraction; `run_agent` greps the survivors into the initial state before step 1 (`T.`)
 - `tool_read.bend` — pure read implementation with proved laws
 - `guard.bend` / `LAWS.bend` / `PROOF.bend` — the path guard and its proofs
 - `tools_c.h` — byte-level file algorithms (Read/Write/Edit/Grep)
