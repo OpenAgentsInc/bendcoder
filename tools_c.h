@@ -391,6 +391,42 @@ static char* bendcoder_dedent(const char* s, size_t width) {
   return out;
 }
 
+// A new_string whose lines open with a hunk-number prefix — "N\t" or
+// "N.N\t" — is a numbered diff hunk (or a Read page) pasted as content, not
+// the file's text: a #41 draft wrote "87\t"-numbered lines into run_tests.sh
+// itself (#47). old_string recovers from the same paste by stripping, but only
+// because the stripped spelling is verified against the file before use;
+// new_string has nothing to verify a strip against, and a partially-numbered
+// paste would land half-stripped, so any hunk-numbered line refuses the edit
+// outright. Returns the refusal text, or NULL when no line is numbered. A
+// trailing newline's empty tail is not a line — the phantom rule grep_scan
+// uses — so "1\tx\n" counts as one numbered line, not a line and a bare one.
+static char* bendcoder_hunk_refusal(const char* new_str) {
+  size_t len = strlen(new_str);
+  size_t pre = 0, all = 0;
+  size_t i = 0;
+  while (i < len) {
+    size_t line_end = i;
+    while (line_end < len && new_str[line_end] != '\n') line_end++;
+    all++;
+    size_t j = i;
+    while (j < line_end && new_str[j] >= '0' && new_str[j] <= '9') j++;
+    if (j > i && j < line_end && new_str[j] == '\t') {
+      pre++;  // "N<tab>"
+    } else if (j > i && j < line_end && new_str[j] == '.') {
+      size_t k = j + 1;
+      while (k < line_end && new_str[k] >= '0' && new_str[k] <= '9') k++;
+      if (k > j + 1 && k < line_end && new_str[k] == '\t') pre++;  // "N.N<tab>"
+    }
+    i = line_end + 1;
+  }
+  if (pre == 0) return NULL;
+  return bendcoder_fmt(
+    "error: new_string is a numbered diff hunk, not file content — %zu of its "
+    "%zu lines carry an \"N<tab>\" hunk-number prefix. Re-draft the "
+    "replacement as plain file content, without the line numbers.", pre, all);
+}
+
 // When old_string does not match, "not found" is a dead end: it says what did
 // not happen, not what is true, so a model with a wrong idea of the file has
 // nothing to correct against and proposes the same text again. This locates the
@@ -471,6 +507,12 @@ static char* tool_edit(const char* path, const char* old_str, const char* new_st
     return strdup("error: `old_string` and `new_string` are identical; nothing to replace.");
   }
 
+  // A numbered new_string is refused before anything else — the paste class
+  // fires on the create path too, where old_string is empty and no fallback
+  // would ever look at the replacement text.
+  char* hunk_err = bendcoder_hunk_refusal(new_str);
+  if (hunk_err) return hunk_err;
+
   int existed = bendcoder_exists(path);
 
   // An empty old_string means "create this file", matching ~/coder's Edit.
@@ -526,7 +568,19 @@ static char* tool_edit(const char* path, const char* old_str, const char* new_st
           old_str = dedented;
           matches = dedented_matches;
           dedented_new = bendcoder_dedent(new_str, width);
-          if (dedented_new) new_str = dedented_new;
+          if (dedented_new) {
+            new_str = dedented_new;
+            // Dedenting can expose hunk numbers the quoting indent hid, so
+            // the paste check runs again on the transformed replacement.
+            char* derr = bendcoder_hunk_refusal(new_str);
+            if (derr) {
+              free(stripped);
+              free(dedented);
+              free(dedented_new);
+              free(content);
+              return derr;
+            }
+          }
         }
       }
     }

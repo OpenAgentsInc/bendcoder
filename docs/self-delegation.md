@@ -52,7 +52,7 @@ Each of these was found by watching a delegation fail, not by review:
 | Model pattern-matched the issue's Rust references and drafted `env::var` | Generation prompts now state the repo is Bend2 + C; issue text names the target files explicitly |
 | `==`/`&&`/`||`/`String.equals` in every Bend draft | README's Bend Constraints names the trap; the same constraint rides in the draft prompts |
 | Weak `apply_edit` after a failed verify rerouted instead of retrying | `S.answer_retry_edit`: a failed `facts.verification` lets an under-floor `apply_edit` act on the error already in the state, and it does not count as a flail-reroute |
-| A draft pasted a numbered diff hunk into a heredoc; the `87\t`-prefixed terminator never matched, `cat` swallowed the rest of `run_tests.sh` into the prelude, and the script exited 0 having verified almost nothing | The `SUITEPASS` trap: the suite sets the flag only at its final line, so any earlier exit — a swallowed script, a truncation, a stray `exit 0` — fails loudly instead of self-certifying |
+| A draft pasted a numbered diff hunk into a heredoc; the `87\t`-prefixed terminator never matched, `cat` swallowed the rest of `run_tests.sh` into the prelude, and the script exited 0 having verified almost nothing | The `SUITEPASS` trap: the suite sets the flag only at its final line, so any earlier exit — a swallowed script, a truncation, a stray `exit 0` — fails loudly instead of self-certifying; and `tool_edit` refusing a `new_string` of `N<tab>`/`N.N<tab>`-prefixed lines as a numbered diff hunk, so the paste itself is caught at the tool rather than by the gate it corrupts |
 
 Plus two knobs that make experiments cheap: `BENDCODER_MODEL` overrides the
 generation model per run, and `BENDCODER_MAX_STEPS` sets the budget.

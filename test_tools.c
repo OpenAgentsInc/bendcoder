@@ -132,6 +132,47 @@ int main(void) {
   char* e9 = tool_edit(indented_path, "def g():\n      legs\nend", "x", 0);
   check(strncmp(e9, "error:", 6) == 0, "dedent does not invent a match across uneven indents");
   free(e9);
+
+  // A new_string that is a numbered diff hunk — "N<tab>" or "N.N<tab>" line
+  // prefixes — is a paste of Read's numbered rendering, not file content: the
+  // #41 draft wrote "87\t"-numbered lines into run_tests.sh itself. Edit
+  // refuses the whole edit rather than stripping, because a partially
+  // numbered paste would land half-stripped; the refusal names the class so
+  // the model re-drafts (#47).
+  const char* hunk_target = "alpha\nbeta\ngamma\n";
+  char* w_hunk = tool_write(scratch_path("hunk.txt"), hunk_target, strlen(hunk_target));
+  free(w_hunk);
+  char* e_h1 = tool_edit(scratch_path("hunk.txt"), "beta", "10\tBETA\n11\tGAMMA", 0);
+  check(e_h1 && strstr(e_h1, "numbered diff hunk") != NULL,
+        "a uniformly numbered new_string is refused as a diff hunk");
+  free(e_h1);
+  char* e_h2 = tool_edit(scratch_path("hunk.txt"), "beta", "10\tBETA\nplain line", 0);
+  check(e_h2 && strstr(e_h2, "numbered diff hunk") != NULL,
+        "a partially numbered new_string is refused rather than half-stripped");
+  free(e_h2);
+  char* e_h3 = tool_edit(scratch_path("hunk.txt"), "beta", "10.5\tBETA", 0);
+  check(e_h3 && strstr(e_h3, "numbered diff hunk") != NULL,
+        "an N.N<tab> hunk number is refused too");
+  free(e_h3);
+  char* r_hunk = tool_read(scratch_path("hunk.txt"), 1, 0);
+  check(r_hunk && strcmp(r_hunk, "1\talpha\n2\tbeta\n3\tgamma\n4\t") == 0,
+        "a refused hunk paste leaves the file untouched");
+  free(r_hunk);
+  // Content that merely contains numbers is not a hunk: the prefix must sit
+  // at the start of a line.
+  char* e_h4 = tool_edit(scratch_path("hunk.txt"), "beta", "version 10.5\tstable", 0);
+  check(e_h4 && strncmp(e_h4, "The file", 8) == 0,
+        "a new_string containing numbers without the prefix is still content");
+  free(e_h4);
+  // The same paste hidden under a uniform quoting indent: the old_string
+  // dedents and resolves, the new_string dedents into numbered lines, and the
+  // refusal fires on the transformed text rather than writing the hunk.
+  char* e_h5 = tool_edit(indented_path,
+                         "  def g():\n    legs\n  end",
+                         "  9\tdef h():\n  10\t  legs\n  11\tend", 0);
+  check(e_h5 && strstr(e_h5, "numbered diff hunk") != NULL,
+        "a hunk paste hiding under a quoting indent is refused after dedent");
+  free(e_h5);
   free(indented_path);
 
   // A write to a file that did not exist reports a creation, which is what the
