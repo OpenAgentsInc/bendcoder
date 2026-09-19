@@ -1,6 +1,13 @@
 # bendcoder
 
-Bendcoder is a new coding agent written in **Bend2**, supplemented with C for network calls, HTTP requests, and systems interfaces missing in Bend2.
+Bendcoder is an autonomous coding agent written in **Bend2**, supplemented
+with C for the pieces Bend cannot express — subprocess, HTTPS, and the rest
+of the systems interface. Its loop edits the repository it runs in,
+verifies every change against a test suite, and rolls back on failure —
+and it is pointed at itself: GitHub issues are handed to the agent as
+goals, and it has drafted, applied and verified real upgrades to its own
+code. `docs/self-delegation.md` records what that has proven and
+`docs/roadmap.md` maps what is still outside its reach (issues #42–#48).
 
 ## Philosophy: Two Primitives (`Classify` & `Generate`)
 
@@ -52,10 +59,13 @@ environment rather than copied. Both files are git-ignored.
 `run_bendcoder.sh` compiles `bendcoder_agent.bend` to `bendcoder_agent_bin` and runs it
 with `BENDCODER_GOAL` set from its arguments. `BENDCODER_MAX_STEPS` raises the
 6-step ceiling; `BENDCODER_VERIFY_CMD` points `apply_edit`'s verification at a
-different suite (default `./run_tests.sh`). Run against a clean tree: kept
-edits land in the working directory, and a failed verify restores the file —
-or removes it outright when the edit is what created it. A run ends
-`[TASK COMPLETED]`, `[STALLED]` on a guard trip, or at the step ceiling.
+different suite (default `./run_tests.sh`); `BENDCODER_MODEL` overrides the
+OpenRouter model every `Generate` call uses (default
+`openai/gpt-oss-120b:nitro`) — the knob for testing whether a stronger model
+moves what the loop can land. Run against a clean tree: kept edits land in
+the working directory, and a failed verify restores the file — or removes it
+outright when the edit is what created it. A run ends `[TASK COMPLETED]`,
+`[STALLED]` on a guard trip, or at the step ceiling.
 
 **Verify.**
 
@@ -74,7 +84,10 @@ keys needed — the suite is fully offline.
 ./delegate-batch.sh 34 11  # several issues in parallel worktrees
 ```
 
-`AGENTS.md` is this runbook written for agents working in the repo.
+The issue text becomes the agent's goal; the diff it produced and the suite
+result come back for a human to review and commit. `docs/self-delegation.md`
+documents the workflow, the failures it has surfaced and the fixes they
+earned. `AGENTS.md` is this runbook written for agents working in the repo.
 
 ---
 
@@ -89,7 +102,7 @@ rather than one per caller.
 | --- | --- |
 | `Read` | 1-indexed lines rendered as `N\tline`, with `offset` and `limit`. Refuses directories, warns on an empty file or an offset past EOF, and caps an unbounded read at 256 KB. |
 | `Write` | Full write / overwrite, creating any missing parent directories. Reports whether it created or updated the file. |
-| `Edit` | Exact-match `old_string` → `new_string`. An `old_string` matching more than once is refused with the match count unless `replace_all` is set; an empty `old_string` creates a new file. When the exact string is absent, a candidate with Read's `N<tab>` line-number prefix stripped is tried, and used only if it resolves. |
+| `Edit` | Exact-match `old_string` → `new_string`. An `old_string` matching more than once is refused with the match count unless `replace_all` is set; an empty `old_string` creates a new file. When the exact string is absent, two fallbacks are tried in order — a candidate with Read's `N<tab>` line-number prefix stripped, then `old_string`/`new_string` dedented by their common leading whitespace — and each is used only if it resolves (a model-drafted block routinely arrives indented inside its sentinel markers). |
 | `Grep` | Literal search. A file yields `N:line`; a directory is searched recursively and yields `path:N:line`, so a hit can be handed straight to Read or Edit. Hits carry a few lines of context, marked `N-line` / `path-N-line` like `grep -C`. Binary files are skipped, long lines clipped, and the match count capped so a common pattern cannot swamp the state. A miss retries case-insensitively; if that finds nothing either, the reply names the longest prefix and suffix of the pattern that do appear and the files holding them, so the next guess starts from something real. |
 
 From Bend (`agent_primitives.bend`):
@@ -116,9 +129,17 @@ proved laws rather than examples in `test_tools.c`.
 
 ## The Self-Improvement Loop
 
+A run starts before the first model call: `git ls-files` is injected into the
+state as `index.paths`, and the goal's identifier terms — `terms.bend` splits
+the goal on non-identifier characters, keeps lowercase words of 3+ chars,
+drops a stop list, and takes the first four distinct survivors — are each
+grepped once and folded into the state as `[SNIFF]` hits. Retrieval the model
+must ask for is not called, so the deterministic retrieval travels in the
+state from step 1 rather than costing steps to rediscover.
+
 `Classify` chooses among `read_code`, `search_code`, `run_build`, `apply_edit`,
-`generate_answer` and `task_complete`. `apply_edit` is the loop that lets
-Bendcoder change its own code:
+`generate_answer` and `task_complete` (plus a `none` escape). `apply_edit` is
+the loop that lets Bendcoder change its own code:
 
 ```
 Classify -> anchor the edit -> Generate new text -> Edit applies it -> verify -> pass? keep : roll back -> Classify
@@ -143,10 +164,10 @@ Classify -> anchor the edit -> Generate new text -> Edit applies it -> verify ->
   replies in a sentinel-delimited block
   (`<<<PATH>>>` / `<<<OLD>>>` / `<<<NEW>>>` / `<<<END>>>`) rather than JSON,
   because an edit carries exact source text and sentinels survive the quotes,
-  braces and newlines a JSON string has to escape. A change spanning files —
-  or several spots in one — repeats the `<<<PATH>>>`/`<<<OLD>>>`/`<<<NEW>>>`
-  group once per hunk before the single `<<<END>>>`, and the hunks are
-  applied and verified as a unit.
+  braces and newlines a JSON string has to escape. One reply is one group —
+  a second `<<<PATH>>>` before `<<<END>>>` is a second hunk, which the parser
+  refuses rather than half-applies — so a multi-hunk change is a sequence of
+  verified edits, not one reply. An empty `<<<OLD>>>` creates the file.
 - **Verify.** `./run_tests.sh` by default; set `BENDCODER_VERIFY_CMD` to point the
   loop at a different suite. The suite ends by printing a `COVERED: <path>`
   line for every file it exercises; a pass over a file absent from that list is
@@ -168,13 +189,53 @@ Classify -> anchor the edit -> Generate new text -> Edit applies it -> verify ->
 selected rather than generated, and no answer can name a file that is not
 there. A `none` option lets Jev say no file is worth reading. Each file
 carries a cursor, so choosing it again serves the next page rather than the
-first one, and a file read to the end drops out of the options. `search_code`
-greps the repository for a literal string, which is how the agent finds the
-file that matters instead of guessing a name; a pattern is open-ended text,
-so it stays with the generation model. Every pattern it runs is recorded with
-its outcome: a re-proposed one is skipped rather than grepped again, and a
-search that keeps missing is nudged at `read_code`, which can only add
-information.
+first one, and a file read to the end drops out of the options. Two
+consecutive `none` picks is the picker judging the whole remaining list —
+reads are exhausted, `read_code` leaves the action options entirely, and a
+`read_code` decision routes to `search_code` instead of asking a picker that
+already said no. `search_code` greps the repository for a literal string,
+which is how the agent finds the file that matters instead of guessing a
+name; a pattern is open-ended text, so it stays with the generation model.
+Every pattern it runs is recorded with its outcome: a re-proposed one is
+skipped rather than grepped again, and a search that keeps missing is nudged
+at `read_code`, which can only add information.
+
+### Routing and the Book
+
+`Classify`'s six typed answers are routed by a table in `selector.bend` —
+`Act`, `Reread`, `Skip`, `Confirm`, `Stop` — with each threshold recording
+what it was tuned on. The rules the route enforces are the loop's memory made
+explicit:
+
+- **Confidence floor.** A decision under 0.45 reroutes to reads; `apply_edit`
+  clears a higher bar (0.65) because a wrong edit writes to disk. But the
+  floor only buys information — two consecutive under-floor reroutes spend
+  it, and the next under-floor decision acts through its guarded path.
+  `task_complete` is the one exception: a weak "done" is never worth acting
+  on.
+- **Retry on the error in state.** An `apply_edit` proposed while the last
+  verification stands failed is a retry informed by a compiler error the
+  state already carries — it acts under the floor rather than rerouting, and
+  it is not counted as a flail.
+- **Flail halt.** Three consecutive under-floor reroutes stop the run rather
+  than burning fuel.
+- **Loop guards.** An edit to a file never read reroutes to a read; an answer
+  on too little information with nothing read yet reroutes to a read; a
+  high-`repeats` action is skipped; top-level `risk` the goal did not ask
+  for halts for confirmation.
+
+This bookkeeping travels as a typed `Book` (`reads.bend`) inside the loop's
+`Progress` — Bend has no globals, so the per-file read cursors, the pending
+read a refused edit names, the search-miss run, the declined-pick run and the
+under-floor tally are fields the handlers hand back each step.
+
+### Token accounting
+
+Every `Generate` response is read twice from the same raw payload —
+`extract.generation` for the assistant text and `extract.usage` for
+`usage.total_tokens` — so one POST yields both. The count accumulates into
+`budget.tokens_used` in the state JSON every step, so the model sees the cost
+it is burning beside the steps it has left.
 
 `BENDCODER_MAX_STEPS` raises the step ceiling (default 6) for a longer run.
 
@@ -197,7 +258,39 @@ balanced, no section break splitting an introduction from its block), and
 `guard.bend` ports `path_is_in_repo`, `LAWS.bend` states its refusal rules over
 every input, and `PROOF.bend` must fill each one for the suite to pass. This is
 also the loop's default verification target, and it reports what it covered;
-see the `COVERED:` note under Verify above.
+see the `COVERED:` note under Verify above. Two hard-won properties sit on
+top of that: the suite gates on reaching its own final line — a `SUITEPASS`
+flag set nowhere else, so a truncated or self-swallowed script exits nonzero
+instead of self-certifying — and every non-ignored `.bend`/`.c`/`.h` must
+appear in the `COVERED:` manifest, so a new file no check reaches fails the
+suite rather than passing untouched.
+
+## What it can do today
+
+Demonstrated on live self-delegations — a human files a GitHub issue,
+`delegate.sh` hands the issue text to the agent as its goal with a step
+budget, the agent works a clean checkout, and `./run_tests.sh` gates every
+edit it lands:
+
+- **Landed autonomously.** Single-file C edits and focused single-site
+  changes — issue #38 (`"store":false` on every OpenRouter request) and #39
+  (TypeSafe retry parity: the full retryable status set, backoff with
+  jitter, the `x-typesafe-retry-count` header) were drafted, applied,
+  verified and kept by the agent itself. So were most of the loop-hardening
+  fixes the delegation failures exposed.
+- **Outside the envelope today.** A novel recursive pure-Bend module — #40
+  needed one and ~8 delegated runs each died on a different Bend2 rule, the
+  near-miss real but the model not yet able to emit a clean module — and
+  wide mechanical field-threading across several files, which is within
+  ability per hunk but costs 5–8 steps per edit cycle, so a ~10-site change
+  outruns a reasonable delegation budget (#41). Both landed manually.
+
+`docs/self-delegation.md` is the experiment log — every failure observed,
+the fix it produced, and the boundary mapped. `docs/roadmap.md` is the
+follow-on assessment: the boundaries share one root cause (the loop samples
+rather than converging — a failed draft is rolled back and resampled instead
+of repaired, and no plan object carries progress between hunks), and the
+ordered upgrade path is tracked as issues #42–#48.
 
 ## The agent
 
@@ -209,7 +302,9 @@ loop, including `apply_edit` and rollback. The modules under it:
 - `parse.bend` — the sentinel edit parser, `type Edit`, `type ToolResult` (`E.`)
 - `guard.bend` — the path guard; its laws are proved in `LAWS.bend`/`PROOF.bend`
 - `reads.bend` — the loop's `Book`: read cursors, the pending read a refused
-  edit names, the search-miss and low-confidence runs (`R.`)
+  edit names, the search-miss, low-confidence and declined-pick runs (`R.`)
+- `terms.bend` — the goal-term sniff: identifier terms extracted from the
+  goal and grepped into the state before step 1 (`T.`)
 - `ui.bend` — colours and rendering (`U.`)
 - `selector.bend` — the question set, the thresholds, the route table (`S.`)
 
@@ -328,21 +423,28 @@ Defined in `agent_primitives.bend`:
 - `ParseAnswer(json: String, qid: String) -> IO(Answer)`
 - `Generate(model: String, system_prompt: String, prompt: String) -> IO(String)`
 - `GenerateText(model: String, system_prompt: String, prompt: String) -> IO(String)`
+- `GenerateUsage(raw: String) -> IO(Nat)` — `usage.total_tokens` read from
+  the same raw response `GenerateText` used, so one POST yields both the
+  text and its cost
 
 `Classify` returns the raw response; `ParseAnswer` reads one question's object
 out of it as a typed `Answer` — `Chosen`, `Scored`, `Nouled`, or `Missing` for
 a failed request — which every consumer matches on.
 
-`Classify` sends `state` as a JSON object with named fields — `directive`,
-`program`, `observations`, `facts`, `index` and `budget` — rather than one
-hand-escaped string of `[label]:` sections, so a question can point at a
-field with a backticked path such as `observations` or `index.search_hits`
-(design rule 3). `index` is injected retrieval — the repository listing and
-the searches already run travel in every payload — because retrieval the
-model must ask for is not called. `observations` is the slot #14's
-`List<Step>` renders into when it lands; until then the entries are the same
-`[label]:` texts the string state carried, bounded per entry and in total
-with the oldest dropped on purpose.
+`Classify` sends `state` as a JSON object with named fields — `directive`
+(the goal), `program` (the current step and the actions already run),
+`observations` (the bounded log of what tools returned), `facts`
+(`changed_paths` and the last `verification` verdict), `index` (injected
+retrieval: `paths` is the repository listing, `search_hits` the searches
+already run — the sniff's hits land here too) and `budget` (`steps_left`
+and the cumulative `tokens_used`) — rather than one hand-escaped string of
+`[label]:` sections, so a question can point at a field with a backticked
+path such as `observations` or `index.search_hits` (design rule 3).
+`index` exists because retrieval the model must ask for is not called.
+`observations` is the slot #14's `List<Step>` renders into when it lands;
+until then the entries are the same `[label]:` texts the string state
+carried, bounded per entry and in total with the oldest dropped on purpose
+— the drop is announced in the list itself.
 
 ### Running the Primitives Pipeline
 
