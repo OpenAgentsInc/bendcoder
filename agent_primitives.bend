@@ -1,5 +1,6 @@
 import Base
 import ./tool_read.bend as T
+import ./plan.bend as W
 
 # ==============================================================================
 # Bendcoder Agent Core: Classify & Generate
@@ -215,7 +216,8 @@ type State is Data:
     base_api: List<&2, String>,      # the Base signature digest, injected
     search_hits: List<&2, String>,   # the searches already run, injected
     steps_left: U32,                 # fuel the loop has left
-    tokens: Nat                      # cumulative OpenRouter spend, total_tokens
+    tokens: Nat,                     # cumulative OpenRouter spend, total_tokens
+    plan: List<&2, W.Item>           # the worklist a `plan` action seeded; items check off as their files change
   }
 
 # The budget the rendered observations must fit, standing where the C
@@ -333,7 +335,7 @@ def state_broken.of(+changed: List<&2, String>, failed: Bool) -> Maybe<&2, Strin
 
 def state_broken(s: State) -> Maybe<&2, String>:
   match s:
-    case St{directive, step, done, obs, +changed, +verification, paths, base, hits, left, tokens}:
+    case St{directive, step, done, obs, +changed, +verification, paths, base, hits, left, tokens, plan}:
       state_broken.of(changed, verif_failed(verification))
 
 # The whole record rendered to the request's `state` object — the shape the
@@ -343,7 +345,7 @@ def state_broken(s: State) -> Maybe<&2, String>:
 # stdlib signature digest, injected beside it (#44).
 def state_to_json(s: State) -> String:
   match s:
-    case St{+directive, +step, +done, +obs, +changed, +verification, +paths, +base, +hits, +left, +tokens}:
+    case St{+directive, +step, +done, +obs, +changed, +verification, +paths, +base, +hits, +left, +tokens, +plan}:
       "{\"directive\":" ++ json_str(directive)
         ++ ",\"program\":{\"step\":" ++ json_str(step)
         ++ ",\"steps_done\":" ++ json_str_list(done) ++ "}"
@@ -351,6 +353,7 @@ def state_to_json(s: State) -> String:
         ++ ",\"facts\":{\"changed_paths\":" ++ json_str_list(changed)
         ++ ",\"verification\":" ++ json_str(verif_str(verification))
         ++ ",\"failed_path\":" ++ maybe_json_str(state_broken.of(changed, verif_failed(verification))) ++ "}"
+        ++ ",\"plan\":" ++ json_str_list(W.shows(plan))
         ++ ",\"index\":{\"paths\":" ++ json_str_list(List.take(&2, String, paths, 255n))
         ++ ",\"base_api\":" ++ json_str_list(base)
         ++ ",\"search_hits\":" ++ json_str_list(bound(hits)) ++ "}"
@@ -365,18 +368,35 @@ def state_to_json(s: State) -> String:
 # rendering, not only the Classify object's (#44).
 def state_text(s: State) -> String:
   match s:
-    case St{+directive, step, done, +obs, changed, verification, paths, +base, hits, left, tokens}:
+    case St{+directive, step, done, +obs, changed, verification, paths, +base, hits, left, tokens, +plan}:
       directive
         ++ Bool.pick(String, List.is_empty(&2, String, base),
           "", "\n[Base API]:\n" ++ String.join(base, "\n"))
+        ++ Bool.pick(String, List.is_empty(&2, W.Item, plan),
+          "", "\n[Plan]:\n" ++ String.join(W.shows(plan), "\n"))
         ++ String.concat(obs)
 
 # The injected repository listing in the shape the anchor's file Choice
 # already consumes — one path per line.
 def state_listing(s: State) -> String:
   match s:
-    case St{directive, step, done, obs, changed, verification, +paths, base, hits, left, tokens}:
+    case St{directive, step, done, obs, changed, verification, +paths, base, hits, left, tokens, plan}:
       String.join(paths, "\n")
+
+# The injected listing as a list — next_open's markable-item test compares a
+# plan item's text against it, and the same set feeds state_plan's gate.
+def state_paths(s: State) -> List<&2, String>:
+  match s:
+    case St{directive, step, done, obs, changed, verification, +paths, base, hits, left, tokens, plan}:
+      paths
+
+# The worklist the loop is carrying — empty until a `plan` action seeds one.
+# Its emptiness is what keeps `plan` in the action options, and its next open
+# item is what gates a premature task_complete.
+def state_plan(s: State) -> List<&2, W.Item>:
+  match s:
+    case St{directive, step, done, obs, changed, verification, paths, base, hits, left, tokens, +plan}:
+      plan
 
 # Whether the last recorded verification failed — the signal that a proposed
 # apply_edit is a retry informed by an error already in the state rather than
@@ -386,7 +406,7 @@ def state_verify_failed.go(+v: Verif) -> Bool:
 
 def state_verify_failed(s: State) -> Bool:
   match s:
-    case St{directive, step, done, obs, changed, +verification, paths, base, hits, left, tokens}:
+    case St{directive, step, done, obs, changed, +verification, paths, base, hits, left, tokens, plan}:
       state_verify_failed.go(verification)
 
 # Whether the program already ran the named action — the final_answer flag
@@ -394,14 +414,15 @@ def state_verify_failed(s: State) -> Bool:
 # tests before overriding the route.
 def state_did(s: State, +name: String) -> Bool:
   match s:
-    case St{directive, +step, +done, obs, changed, verification, paths, base, hits, left, tokens}:
+    case St{directive, +step, +done, obs, changed, verification, paths, base, hits, left, tokens, plan}:
       Bool.or(String.eq(step, name), List.contains(~String, ~String.eq, done, name))
 
 # The state a run starts with: the goal as directive, the injected listing as
 # index.paths, the injected signature digest as index.base_api, and everything
-# else at its empty or "unknown" initial value.
+# else at its empty or "unknown" initial value — the plan included, which a
+# `plan` action is the only writer of.
 def state.new(+directive: String, +paths: List<&2, String>, +base: List<&2, String>, +left: U32) -> State:
-  St{directive, "", Nil{}, Nil{}, Nil{}, VUnknown{}, paths, base, Nil{}, left, 0n}
+  St{directive, "", Nil{}, Nil{}, Nil{}, VUnknown{}, paths, base, Nil{}, left, 0n, {Nil{} : List<&2, W.Item>}}
 
 # Build complete TypeSafe System One request JSON
 def build_classify_payload(state: State, qs: List<&2, Question>) -> String:
@@ -557,7 +578,8 @@ def demo_state() -> State:
     ["def String.to_lower(s: String) -> String:"],
     ["greet:\nhello.bend:4:greet"],
     5,
-    700n
+    700n,
+    [W.It{"add a greet function to hello.bend", True{}}, W.It{"verify the suite", False{}}]
   }
 
 # The same record after a failed verify kept its draft on disk: the failed
@@ -574,7 +596,8 @@ def demo_broken() -> State:
     ["def String.to_lower(s: String) -> String:"],
     ["greet:\nhello.bend:4:greet"],
     4,
-    900n
+    900n,
+    [W.It{"add a greet function to hello.bend", False{}}]
   }
 
 def main() -> IO(Unit):
@@ -583,6 +606,6 @@ def main() -> IO(Unit):
     u2 : Unit <- IO.print(state_to_json(demo_broken()))
     IO.print(json_str_list(bound.with(["aaa", "bbb", "ccc"], 4n)))
 
-#|{"directive":"add a greet function","program":{"step":"search_code","steps_done":["read_code"]},"observations":["[Search for 'greet']:\nhello.bend:4:greet"],"facts":{"changed_paths":["hello.bend"],"verification":"passed","failed_path":null},"index":{"paths":["agent_primitives.bend","hello.bend"],"base_api":["def String.to_lower(s: String) -> String:"],"search_hits":["greet:\nhello.bend:4:greet"]},"budget":{"steps_left":5,"tokens_used":700}}
-#|{"directive":"add a greet function","program":{"step":"apply_edit","steps_done":["read_code"]},"observations":["[Verification failed; edit to hello.bend left in place]:\nerror: expected ':'"],"facts":{"changed_paths":["hello.bend"],"verification":"failed","failed_path":"hello.bend"},"index":{"paths":["agent_primitives.bend","hello.bend"],"base_api":["def String.to_lower(s: String) -> String:"],"search_hits":["greet:\nhello.bend:4:greet"]},"budget":{"steps_left":4,"tokens_used":900}}
+#|{"directive":"add a greet function","program":{"step":"search_code","steps_done":["read_code"]},"observations":["[Search for 'greet']:\nhello.bend:4:greet"],"facts":{"changed_paths":["hello.bend"],"verification":"passed","failed_path":null},"plan":["[x] add a greet function to hello.bend","[ ] verify the suite"],"index":{"paths":["agent_primitives.bend","hello.bend"],"base_api":["def String.to_lower(s: String) -> String:"],"search_hits":["greet:\nhello.bend:4:greet"]},"budget":{"steps_left":5,"tokens_used":700}}
+#|{"directive":"add a greet function","program":{"step":"apply_edit","steps_done":["read_code"]},"observations":["[Verification failed; edit to hello.bend left in place]:\nerror: expected ':'"],"facts":{"changed_paths":["hello.bend"],"verification":"failed","failed_path":"hello.bend"},"plan":["[ ] add a greet function to hello.bend"],"index":{"paths":["agent_primitives.bend","hello.bend"],"base_api":["def String.to_lower(s: String) -> String:"],"search_hits":["greet:\nhello.bend:4:greet"]},"budget":{"steps_left":4,"tokens_used":900}}
 #|["...2 earlier entr(ies) dropped to fit the state budget ...","ccc"]

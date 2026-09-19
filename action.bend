@@ -14,6 +14,7 @@ type Action is Data:
   SearchCode{}
   RunBuild{}
   ApplyEdit{}
+  Plan{}
   GenerateAnswer{}
   TaskComplete{}
 
@@ -27,6 +28,7 @@ def show_action(a: Action) -> String:
     case SearchCode{}:      "search_code"
     case RunBuild{}:        "run_build"
     case ApplyEdit{}:       "apply_edit"
+    case Plan{}:            "plan"
     case GenerateAnswer{}:  "generate_answer"
     case TaskComplete{}:    "task_complete"
 
@@ -35,16 +37,17 @@ def show_action(a: Action) -> String:
 # already did.
 def parse_action.of(
   is_read: Bool, is_search: Bool, is_build: Bool,
-  is_edit: Bool, is_answer: Bool, is_complete: Bool
+  is_edit: Bool, is_plan: Bool, is_answer: Bool, is_complete: Bool
 ) -> Maybe<&2, Action>:
-  match is_read is_search is_build is_edit is_answer is_complete:
-    case True{} _ _ _ _ _:  Some{ReadCode{}}
-    case _ True{} _ _ _ _:  Some{SearchCode{}}
-    case _ _ True{} _ _ _:  Some{RunBuild{}}
-    case _ _ _ True{} _ _:  Some{ApplyEdit{}}
-    case _ _ _ _ True{} _:  Some{GenerateAnswer{}}
-    case _ _ _ _ _ True{}:  Some{TaskComplete{}}
-    case _ _ _ _ _ _:       None{}
+  match is_read is_search is_build is_edit is_plan is_answer is_complete:
+    case True{} _ _ _ _ _ _:  Some{ReadCode{}}
+    case _ True{} _ _ _ _ _:  Some{SearchCode{}}
+    case _ _ True{} _ _ _ _:  Some{RunBuild{}}
+    case _ _ _ True{} _ _ _:  Some{ApplyEdit{}}
+    case _ _ _ _ True{} _ _:  Some{Plan{}}
+    case _ _ _ _ _ True{} _:  Some{GenerateAnswer{}}
+    case _ _ _ _ _ _ True{}:  Some{TaskComplete{}}
+    case _ _ _ _ _ _ _:       None{}
 
 # Every test false means the decision named no action. Handing back None{}
 # makes that a parse failure the caller must handle, not a silent fallthrough
@@ -55,6 +58,7 @@ def parse_action(+s: String) -> Maybe<&2, Action>:
     String.eq(s, "search_code"),
     String.eq(s, "run_build"),
     String.eq(s, "apply_edit"),
+    String.eq(s, "plan"),
     String.eq(s, "generate_answer"),
     String.eq(s, "task_complete"))
 
@@ -71,5 +75,6 @@ def Action.roundtrip(a):
     case SearchCode{}:     {==}
     case RunBuild{}:       {==}
     case ApplyEdit{}:      {==}
+    case Plan{}:           {==}
     case GenerateAnswer{}: {==}
     case TaskComplete{}:   {==}

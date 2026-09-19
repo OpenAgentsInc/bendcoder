@@ -7,6 +7,7 @@ import ./selector.bend as S
 import ./reads.bend as R
 import ./terms.bend as T
 import ./base_api.bend as B
+import ./plan.bend as W
 
 # ==============================================================================
 # Bendcoder: Autonomous Coding Agent Loop
@@ -38,6 +39,7 @@ type Report is Data:
     verify: Maybe<&2, P.Verif>,  # the outcome for `facts.verification`
     changed: List<&2, String>,   # paths for `facts.changed_paths`
     hits: List<&2, String>,      # entries for `index.search_hits`
+    plan: Maybe<&2, List<&2, W.Item>>, # the worklist a `plan` action seeded
     tokens: Nat                  # OpenRouter spend this step, total_tokens
   }
 
@@ -56,7 +58,7 @@ type Progress is Data:
   Stalled{reason: String}
 
 # The question set lives in selector.bend beside the thresholds and the route
-# table that consume them (design rule 8); agent_step asks S.questions().
+# table that consume them (design rule 8); agent_step asks S.questions(Bool.not(List.is_empty(&2, W.Item, P.state_plan(state)))).
 
 # ------------------------------------------------------------------------------
 # Reports: what the handlers build, and how one folds into the state
@@ -65,28 +67,33 @@ type Progress is Data:
 # "[label]:\nbody" entry the string state appended — the List<Step> of #14
 # renders into this slot when it lands.
 def rep.of(+label: String, +body: String) -> Report:
-  Rep{Some{"\n[" ++ label ++ "]:\n" ++ body}, None{}, None{}, Nil{}, Nil{}, 0n}
+  Rep{Some{"\n[" ++ label ++ "]:\n" ++ body}, None{}, None{}, Nil{}, Nil{}, None{}, 0n}
 
 # A search records its result under `index.search_hits` as well as in the
 # observations: the index is the retrieval a later question reads without
 # the model having to ask for it again.
 def rep.search(+label: String, +body: String, +hit: String) -> Report:
-  Rep{Some{"\n[" ++ label ++ "]:\n" ++ body}, None{}, None{}, Nil{}, [hit], 0n}
+  Rep{Some{"\n[" ++ label ++ "]:\n" ++ body}, None{}, None{}, Nil{}, [hit], None{}, 0n}
 
 def rep.verify(+label: String, +body: String, v: P.Verif) -> Report:
-  Rep{Some{"\n[" ++ label ++ "]:\n" ++ body}, None{}, Some{v}, Nil{}, Nil{}, 0n}
+  Rep{Some{"\n[" ++ label ++ "]:\n" ++ body}, None{}, Some{v}, Nil{}, Nil{}, None{}, 0n}
 
 def rep.edited(+label: String, +body: String, v: P.Verif, +path: String) -> Report:
-  Rep{Some{"\n[" ++ label ++ "]:\n" ++ body}, None{}, Some{v}, [path], Nil{}, 0n}
+  Rep{Some{"\n[" ++ label ++ "]:\n" ++ body}, None{}, Some{v}, [path], Nil{}, None{}, 0n}
+
+# A `plan` action's report: the parsed worklist joins the state beside the
+# observation that shows it, so the next Classify sees what is owed.
+def rep.planned(+label: String, +body: String, +items: List<&2, W.Item>) -> Report:
+  Rep{Some{"\n[" ++ label ++ "]:\n" ++ body}, None{}, None{}, Nil{}, Nil{}, Some{items}, 0n}
 
 # A failed verify keeps the draft on disk (#42): the path is a changed path —
 # the file differs from what it was — and the failure is recorded so the
 # retry rule and the failed_path fact both see it.
 def rep.broken(+label: String, +body: String, +path: String) -> Report:
-  Rep{Some{"\n[" ++ label ++ "]:\n" ++ body}, None{}, Some{P.VFail{}}, [path], Nil{}, 0n}
+  Rep{Some{"\n[" ++ label ++ "]:\n" ++ body}, None{}, Some{P.VFail{}}, [path], Nil{}, None{}, 0n}
 
 def rep.empty() -> Report:
-  Rep{None{}, None{}, None{}, Nil{}, Nil{}, 0n}
+  Rep{None{}, None{}, None{}, Nil{}, Nil{}, None{}, 0n}
 
 # rep.note prepends a line to the observation (the search-stuck nudge);
 # rep.act stamps the action that ran, which is known at dispatch, not where
@@ -100,13 +107,13 @@ def rep.obs.pre(+obs: Maybe<&2, String>, +note: String) -> Maybe<&2, String>:
 
 def rep.note(+r: Report, +note: String) -> Report:
   match r:
-    case Rep{+obs, +act, +verify, +changed, +hits, +toks}:
-      Rep{rep.obs.pre(obs, note), act, verify, changed, hits, toks}
+    case Rep{+obs, +act, +verify, +changed, +hits, +plan, +toks}:
+      Rep{rep.obs.pre(obs, note), act, verify, changed, hits, plan, toks}
 
 def rep.act(+r: Report, +name: String) -> Report:
   match r:
-    case Rep{+obs, act, +verify, +changed, +hits, +toks}:
-      Rep{obs, Some{name}, verify, changed, hits, toks}
+    case Rep{+obs, act, +verify, +changed, +hits, +plan, +toks}:
+      Rep{obs, Some{name}, verify, changed, hits, plan, toks}
 
 def acted(+name: String, p: Progress) -> Progress:
   match p:
@@ -120,8 +127,8 @@ def acted(+name: String, p: Progress) -> Progress:
 # is built deep inside the handler it called.
 def rep.tok(+r: Report, +n: Nat) -> Report:
   match r:
-    case Rep{+obs, +act, +verify, +changed, +hits, +toks}:
-      Rep{obs, act, verify, changed, hits, Nat.add(toks, n)}
+    case Rep{+obs, +act, +verify, +changed, +hits, +plan, +toks}:
+      Rep{obs, act, verify, changed, hits, plan, Nat.add(toks, n)}
 
 def tokenized(p: Progress, +n: Nat) -> Progress:
   match p:
@@ -186,11 +193,22 @@ def verif_or(+cur: P.Verif, m: Maybe<&2, P.Verif>) -> P.Verif:
     case None{}:
       cur
 
+# The worklist's fold: an unchecked item naming a file this step's report
+# left changed checks off (#45) — progress is marked on the data itself, so
+# the next step renders what is done and what is left rather than the model
+# re-deriving it. A `plan` action's own report replaces the list outright.
+def plan_or(+cur: List<&2, W.Item>, m: Maybe<&2, List<&2, W.Item>>) -> List<&2, W.Item>:
+  match m:
+    case Some{+v}:
+      v
+    case None{}:
+      cur
+
 # The state transition itself: one report folded in, newest entries last.
 def apply_report(s: P.State, r: Report, +left: U32) -> P.State:
   match s r:
-    case P.St{directive, +step, done, obs, changed, verif, paths, base, hits, _, +toks}
-         Rep{nobs, +nact, nver, nchanged, nhits, ntok}:
+    case P.St{directive, +step, done, obs, changed, verif, paths, base, hits, _, +toks, plan}
+         Rep{nobs, +nact, nver, +nchanged, nhits, nplan, ntok}:
       P.St{
         directive,
         step_or(step, nact),
@@ -202,7 +220,8 @@ def apply_report(s: P.State, r: Report, +left: U32) -> P.State:
         base,
         List.append(&2, String, hits, nhits),
         left,
-        Nat.add(toks, ntok)}
+        Nat.add(toks, ntok),
+        plan_or(W.mark(plan, nchanged), nplan)}
 
 # One tool result, both shown and remembered: the label/body pair is what the
 # person watching sees; the Report is what the loop's state learns. The Book
@@ -962,6 +981,27 @@ def finish_guarded(m: Maybe<&2, String>) -> Progress:
 
 # The action arrives already routed: `none` and unparseable decisions are Stop
 # rows in the selector's table upstream, so this match is over Action itself.
+# plan: ask for the worklist the rest of the run works through. The reply is
+# one item per line, parsed by plan.bend into Items that check themselves off
+# as their files appear in facts.changed_paths -- which is why the items are
+# asked to name a file. rep.planned carries the list out so the next round's
+# state renders it, and route.gate reroutes a premature task_complete while
+# any item is still open.
+def act_plan(+state: P.State, +book: R.Book) -> IO(Progress):
+  do IO<Progress>:
+    u1 : Unit <- IO.print(U.color_magenta("[TOOL PLAN] Drafting the worklist ..."))
+    m : String <- gen_model()
+    +raw : String <- P.Generate(
+      m,
+      "You are Bendcoder, an autonomous coding agent written in Bend2. Your repository's sources are Bend2 (.bend) and C (.c/.h) only. Reply with a worklist and nothing else: one step per line, each naming the repository file it lands in. No prose, no numbering, no commentary.",
+      "State:\n" ++ P.state_text(state) ++ "\nTask: List the steps that would satisfy the goal, in order, each naming the file it changes."
+    )
+    +gen : String <- P.extract.generation(raw)
+    toks : Nat <- P.GenerateUsage(raw)
+    items : List<&2, W.Item> = W.parse(gen)
+    p : Progress <- remember(rep.planned("Plan", gen, items), "Plan", gen, R.book_acted(book))
+    IO.pure(Progress, tokenized(p, toks))
+
 def dispatch_action(a: A.Action, +state: P.State, +book: R.Book) -> IO(Progress):
   match a:
     case A.ReadCode{}:
@@ -974,6 +1014,8 @@ def dispatch_action(a: A.Action, +state: P.State, +book: R.Book) -> IO(Progress)
       apply_entry(P.state_broken(state), state, book)
     case A.GenerateAnswer{}:
       act_generate_answer(state, book)
+    case A.Plan{}:
+      act_plan(state, book)
     case A.TaskComplete{}:
       IO.pure(Progress, finish_guarded(P.state_broken(state)))
 
@@ -1083,7 +1125,8 @@ def run_answers(+answers: S.LoopAnswers, +state: P.State, +book: R.Book, last: B
           ", progress " ++ answer_note(progress) ++ ")"))
         u2 : Unit <- IO.print("")
         run_route(
-          S.route(answers, R.book_unread(book), R.book_stuck(book), spent, R.book_read_out(book), P.state_verify_failed(state), R.book_met(book)),
+          S.route(answers, R.book_unread(book), R.book_stuck(book), spent, R.book_read_out(book), P.state_verify_failed(state), R.book_met(book),
+                  W.next_open(P.state_plan(state), P.state_paths(state))),
           state, book,
           Bool.and(last, Bool.not(P.state_did(state, "generate_answer"))))
 
@@ -1124,7 +1167,7 @@ def agent_step(fuel: Nat, phase: Progress, +step_num: U32, +state: P.State) -> I
         u3 : Unit <- IO.print(U.color_cyan(U.rule()))
         +rest : Nat = p
         +state2 : P.State = apply_report(state, rep, U32.from_nat(Nat.add(1n, rest)))
-        +c_raw : String <- P.Classify(state2, S.questions(R.book_read_out(book)))
+        +c_raw : String <- P.Classify(state2, S.questions(R.book_read_out(book), Bool.not(List.is_empty(&2, W.Item, P.state_plan(state)))))
         +action : P.Answer <- P.ParseAnswer(c_raw, "action")
         blocked : P.Answer <- P.ParseAnswer(c_raw, "is_blocked")
         repeats : P.Answer <- P.ParseAnswer(c_raw, "repeats")
