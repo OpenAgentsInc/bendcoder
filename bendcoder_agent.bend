@@ -36,7 +36,8 @@ type Report is Data:
     act: Maybe<&2, String>,      # the action that ran, for `program`
     verify: Maybe<&2, P.Verif>,  # the outcome for `facts.verification`
     changed: List<&2, String>,   # paths for `facts.changed_paths`
-    hits: List<&2, String>       # entries for `index.search_hits`
+    hits: List<&2, String>,      # entries for `index.search_hits`
+    tokens: Nat                  # OpenRouter spend this step, total_tokens
   }
 
 type Progress is Data:
@@ -62,22 +63,22 @@ type Progress is Data:
 # "[label]:\nbody" entry the string state appended — the List<Step> of #14
 # renders into this slot when it lands.
 def rep.of(+label: String, +body: String) -> Report:
-  Rep{Some{"\n[" ++ label ++ "]:\n" ++ body}, None{}, None{}, Nil{}, Nil{}}
+  Rep{Some{"\n[" ++ label ++ "]:\n" ++ body}, None{}, None{}, Nil{}, Nil{}, 0n}
 
 # A search records its result under `index.search_hits` as well as in the
 # observations: the index is the retrieval a later question reads without
 # the model having to ask for it again.
 def rep.search(+label: String, +body: String, +hit: String) -> Report:
-  Rep{Some{"\n[" ++ label ++ "]:\n" ++ body}, None{}, None{}, Nil{}, [hit]}
+  Rep{Some{"\n[" ++ label ++ "]:\n" ++ body}, None{}, None{}, Nil{}, [hit], 0n}
 
 def rep.verify(+label: String, +body: String, v: P.Verif) -> Report:
-  Rep{Some{"\n[" ++ label ++ "]:\n" ++ body}, None{}, Some{v}, Nil{}, Nil{}}
+  Rep{Some{"\n[" ++ label ++ "]:\n" ++ body}, None{}, Some{v}, Nil{}, Nil{}, 0n}
 
 def rep.edited(+label: String, +body: String, v: P.Verif, +path: String) -> Report:
-  Rep{Some{"\n[" ++ label ++ "]:\n" ++ body}, None{}, Some{v}, [path], Nil{}}
+  Rep{Some{"\n[" ++ label ++ "]:\n" ++ body}, None{}, Some{v}, [path], Nil{}, 0n}
 
 def rep.empty() -> Report:
-  Rep{None{}, None{}, None{}, Nil{}, Nil{}}
+  Rep{None{}, None{}, None{}, Nil{}, Nil{}, 0n}
 
 # rep.note prepends a line to the observation (the search-stuck nudge);
 # rep.act stamps the action that ran, which is known at dispatch, not where
@@ -91,18 +92,33 @@ def rep.obs.pre(+obs: Maybe<&2, String>, +note: String) -> Maybe<&2, String>:
 
 def rep.note(+r: Report, +note: String) -> Report:
   match r:
-    case Rep{+obs, +act, +verify, +changed, +hits}:
-      Rep{rep.obs.pre(obs, note), act, verify, changed, hits}
+    case Rep{+obs, +act, +verify, +changed, +hits, +toks}:
+      Rep{rep.obs.pre(obs, note), act, verify, changed, hits, toks}
 
 def rep.act(+r: Report, +name: String) -> Report:
   match r:
-    case Rep{+obs, act, +verify, +changed, +hits}:
-      Rep{obs, Some{name}, verify, changed, hits}
+    case Rep{+obs, act, +verify, +changed, +hits, +toks}:
+      Rep{obs, Some{name}, verify, changed, hits, toks}
 
 def acted(+name: String, p: Progress) -> Progress:
   match p:
     case Running{rep, +book}:
       Running{rep.act(rep, name), book}
+    case other:
+      p
+
+# The tokens a step's OpenRouter call spent, stamped onto the report the way
+# rep.act stamps the action — the spend is known at the call site, the report
+# is built deep inside the handler it called.
+def rep.tok(+r: Report, +n: Nat) -> Report:
+  match r:
+    case Rep{+obs, +act, +verify, +changed, +hits, +toks}:
+      Rep{obs, act, verify, changed, hits, Nat.add(toks, n)}
+
+def tokenized(p: Progress, +n: Nat) -> Progress:
+  match p:
+    case Running{+rep, +book}:
+      Running{rep.tok(rep, n), book}
     case other:
       p
 
@@ -154,8 +170,8 @@ def verif_or(+cur: P.Verif, m: Maybe<&2, P.Verif>) -> P.Verif:
 # The state transition itself: one report folded in, newest entries last.
 def apply_report(s: P.State, r: Report, +left: U32) -> P.State:
   match s r:
-    case P.St{directive, +step, done, obs, changed, verif, paths, hits, _}
-         Rep{nobs, +nact, nver, nchanged, nhits}:
+    case P.St{directive, +step, done, obs, changed, verif, paths, hits, _, +toks}
+         Rep{nobs, +nact, nver, nchanged, nhits, ntok}:
       P.St{
         directive,
         step_or(step, nact),
@@ -165,7 +181,8 @@ def apply_report(s: P.State, r: Report, +left: U32) -> P.State:
         verif_or(verif, nver),
         paths,
         List.append(&2, String, hits, nhits),
-        left}
+        left,
+        Nat.add(toks, ntok)}
 
 # One tool result, both shown and remembered: the label/body pair is what the
 # person watching sees; the Report is what the loop's state learns. The Book
@@ -264,7 +281,7 @@ def act_search_code.check(state: P.State, +pattern: String, +book: R.Book) -> IO
   act_search_code.go(pattern, book, String.contains(P.state_text(state), "Search for '" ++ pattern ++ "'"))
 
 # The generation model is a run knob — BENDCODER_MODEL names the OpenRouter
-# model for every GenerateText call; unset or empty keeps the default.
+# model for every Generate call; unset or empty keeps the default.
 def gen_model() -> IO(String):
   do IO<String>:
     env : Result<&1, &1, U32 & String, String> <- IO.get_env("BENDCODER_MODEL")
@@ -274,12 +291,15 @@ def gen_model() -> IO(String):
 def act_search_code(+state: P.State, +book: R.Book) -> IO(Progress):
   do IO<Progress>:
     m : String <- gen_model()
-    reply : String <- P.GenerateText(
+    +raw : String <- P.Generate(
       m,
       "You choose one literal search string. Reply with the string alone, nothing else.",
       "State:\n" ++ P.state_text(state) ++ "\nGive one literal string to search this repository for. Not a regular expression. A fragment of the right name beats a full guess at it."
     )
-    act_search_code.check(state, pick_last(String.lines(reply), ""), book)
+    reply : String <- P.extract.generation(raw)
+    toks : Nat <- P.GenerateUsage(raw)
+    p : Progress <- act_search_code.check(state, pick_last(String.lines(reply), ""), book)
+    IO.pure(Progress, tokenized(p, toks))
 
 # Exec returns Done{output} or Fail{(code, output)}, so the loop can finally
 # tell a passing verification from a failing one. A match scrutinizes only a
@@ -432,12 +452,15 @@ def act_generate_answer(+state: P.State, +book: R.Book) -> IO(Progress):
   do IO<Progress>:
     u1 : Unit <- IO.print(U.color_magenta("[TOOL GENERATE] Calling LLM (OpenRouter) to generate code ..."))
     m : String <- gen_model()
-    gen : String <- P.GenerateText(
+    +raw : String <- P.Generate(
       m,
       "You are Bendcoder, an autonomous coding agent written in Bend2. Your repository's sources are Bend2 (.bend) and C (.c/.h) only -- the goal may quote a reference implementation in another language, but every change you propose lands in this repository's own files. Produce concise, direct code.",
       "State:\n" ++ P.state_text(state) ++ "\nTask: Describe the single next change that would advance this goal, naming the repository file it lands in."
     )
-    report("Generated Plan", gen, book)
+    gen : String <- P.extract.generation(raw)
+    toks : Nat <- P.GenerateUsage(raw)
+    p : Progress <- report("Generated Plan", gen, book)
+    IO.pure(Progress, tokenized(p, toks))
 
 # ------------------------------------------------------------------------------
 # apply_edit: draft an edit, apply it, verify, roll back on failure
@@ -589,11 +612,14 @@ def draft_apply_edit(+state: P.State, +book: R.Book) -> IO(Progress):
   do IO<Progress>:
     u1 : Unit <- IO.print(U.color_magenta("[TOOL EDIT] Drafting an edit via OpenRouter ..."))
     m : String <- gen_model()
-    reply : String <- P.GenerateText(
+    +raw : String <- P.Generate(
       m,
       E.edit_format_system(),
       "State so far:\n" ++ P.state_text(state))
-    act_apply_edit(E.parse_edit(reply), book)
+    reply : String <- P.extract.generation(raw)
+    toks : Nat <- P.GenerateUsage(raw)
+    p : Progress <- act_apply_edit(E.parse_edit(reply), book)
+    IO.pure(Progress, tokenized(p, toks))
 
 # ------------------------------------------------------------------------------
 # The anchored edit: a Choice over line ids, never a transcribed old_string
@@ -687,11 +713,14 @@ def anchor_generate(+state: P.State, +path: String, +line: U32, +old_str: String
   do IO<Progress>:
     u1 : Unit <- IO.print(U.color_magenta("[TOOL GENERATE] Writing replacement text for " ++ path ++ " around line " ++ U32.show(line) ++ " ..."))
     m : String <- gen_model()
-    reply : String <- P.GenerateText(
+    +raw : String <- P.Generate(
       m,
       new_format_system(),
       "State so far:\n" ++ P.state_text(state) ++ "\n\nThe change anchors at line " ++ U32.show(line) ++ " of " ++ path ++ ". The exact existing text to replace is:\n" ++ old_str ++ "\nWrite the replacement text and nothing else.")
-    apply_block(path, old_str, extract_new_str(reply), True{}, book)
+    reply : String <- P.extract.generation(raw)
+    toks : Nat <- P.GenerateUsage(raw)
+    p : Progress <- apply_block(path, old_str, extract_new_str(reply), True{}, book)
+    IO.pure(Progress, tokenized(p, toks))
 
 def anchor_window.of(m: Maybe<&2, String>, +state: P.State, +path: String, +line: U32, +book: R.Book) -> IO(Progress):
   match m:

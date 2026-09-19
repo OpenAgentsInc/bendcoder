@@ -215,3 +215,47 @@ static void __attribute__((constructor)) extract_generation_use(void) {
   io_eff(CID_EXTRACT_GENERATION, extract_generation_run, 0);
 }
 #endif  // CID_EXTRACT_GENERATION
+
+#ifdef CID_EXTRACT_USAGE
+// -----------------------------------------------------------------------------
+// 3. extract_usage: total_tokens from a chat completion's usage block
+// extract.usage(json: String) -> IO(String)
+// -----------------------------------------------------------------------------
+
+// The digits after "total_tokens": — the same positional strstr the rest of
+// this file uses, which is fine because a chat envelope carries one usage
+// block. "0" when the key is absent, so a provider that omits usage reads as
+// free rather than as a parse failure.
+static char* parse_usage_tokens(const char* json) {
+  long n = 0;
+  const char* p = json ? strstr(json, "\"total_tokens\":") : NULL;
+  if (p) {
+    p += strlen("\"total_tokens\":");
+    while (*p == ' ') p++;
+    n = strtol(p, NULL, 10);
+    if (n < 0) n = 0;
+  }
+  char* out = malloc(24);
+  snprintf(out, 24, "%ld", n);
+  return out;
+}
+
+static Term extract_usage_pack(Env e, IoWork* w) {
+  Term str = io_str(e, w->data, w->size);
+  free(w->data);
+  return str;
+}
+
+Term extract_usage_run(Env e, Term* f, IoWork* w) {
+  uint64_t j_len = 0;
+  char* json = io_cstr(e, f[0], &j_len);
+  w->data = parse_usage_tokens(json);
+  w->size = strlen(w->data);
+  free(json);
+  return extract_usage_pack(e, w);
+}
+
+static void __attribute__((constructor)) extract_usage_use(void) {
+  io_eff(CID_EXTRACT_USAGE, extract_usage_run, 0);
+}
+#endif  // CID_EXTRACT_USAGE

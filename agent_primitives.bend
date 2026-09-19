@@ -212,7 +212,8 @@ type State is Data:
     verification: Verif,             # the last verification's outcome
     index_paths: List<&2, String>,   # the repository listing, injected
     search_hits: List<&2, String>,   # the searches already run, injected
-    steps_left: U32                  # fuel the loop has left
+    steps_left: U32,                 # fuel the loop has left
+    tokens: Nat                      # cumulative OpenRouter spend, total_tokens
   }
 
 # The budget the rendered observations must fit, standing where the C
@@ -305,7 +306,7 @@ def verif_str(v: Verif) -> String:
 # than that could not be offered as options anyway.
 def state_to_json(s: State) -> String:
   match s:
-    case St{+directive, +step, +done, +obs, +changed, verification, +paths, +hits, +left}:
+    case St{+directive, +step, +done, +obs, +changed, verification, +paths, +hits, +left, +tokens}:
       "{\"directive\":" ++ json_str(directive)
         ++ ",\"program\":{\"step\":" ++ json_str(step)
         ++ ",\"steps_done\":" ++ json_str_list(done) ++ "}"
@@ -314,21 +315,22 @@ def state_to_json(s: State) -> String:
         ++ ",\"verification\":" ++ json_str(verif_str(verification)) ++ "}"
         ++ ",\"index\":{\"paths\":" ++ json_str_list(List.take(&2, String, paths, 255n))
         ++ ",\"search_hits\":" ++ json_str_list(bound(hits)) ++ "}"
-        ++ ",\"budget\":{\"steps_left\":" ++ U32.show(left) ++ "}}"
+        ++ ",\"budget\":{\"steps_left\":" ++ U32.show(left)
+        ++ ",\"tokens_used\":" ++ Nat.show(tokens) ++ "}}"
 
 # The text form the generative model still gets — Classify reads the object,
 # but Generate's prompts want prose, which is the directive plus the
 # observations exactly as the old string state concatenated them.
 def state_text(s: State) -> String:
   match s:
-    case St{+directive, step, done, +obs, changed, verification, paths, hits, left}:
+    case St{+directive, step, done, +obs, changed, verification, paths, hits, left, tokens}:
       directive ++ String.concat(obs)
 
 # The injected repository listing in the shape the anchor's file Choice
 # already consumes — one path per line.
 def state_listing(s: State) -> String:
   match s:
-    case St{directive, step, done, obs, changed, verification, +paths, hits, left}:
+    case St{directive, step, done, obs, changed, verification, +paths, hits, left, tokens}:
       String.join(paths, "\n")
 
 # Whether the last recorded verification failed — the signal that a proposed
@@ -343,7 +345,7 @@ def state_verify_failed.go(+v: Verif) -> Bool:
 
 def state_verify_failed(s: State) -> Bool:
   match s:
-    case St{directive, step, done, obs, changed, +verification, paths, hits, left}:
+    case St{directive, step, done, obs, changed, +verification, paths, hits, left, tokens}:
       state_verify_failed.go(verification)
 
 # Whether the program already ran the named action — the final_answer flag
@@ -351,13 +353,13 @@ def state_verify_failed(s: State) -> Bool:
 # tests before overriding the route.
 def state_did(s: State, +name: String) -> Bool:
   match s:
-    case St{directive, +step, +done, obs, changed, verification, paths, hits, left}:
+    case St{directive, +step, +done, obs, changed, verification, paths, hits, left, tokens}:
       Bool.or(String.eq(step, name), List.contains(~String, ~String.eq, done, name))
 
 # The state a run starts with: the goal as directive, the injected listing as
 # index.paths, and everything else at its empty or "unknown" initial value.
 def state.new(+directive: String, +paths: List<&2, String>, +left: U32) -> State:
-  St{directive, "", Nil{}, Nil{}, Nil{}, VUnknown{}, paths, Nil{}, left}
+  St{directive, "", Nil{}, Nil{}, Nil{}, VUnknown{}, paths, Nil{}, left, 0n}
 
 # Build complete TypeSafe System One request JSON
 def build_classify_payload(state: State, qs: List<&2, Question>) -> String:
@@ -424,11 +426,27 @@ law extract.generation:
 def extract.generation(json):
   import "./json_parse_c.c"
 
+# Lifts the usage block's total_tokens out of the same envelope, as digits —
+# the FFI boundary is string-only, so the Nat read happens on this side.
+law extract.usage:
+  String -> IO(String)
+
+def extract.usage(json):
+  import "./json_parse_c.c"
+
 # Generate, with the model's reply lifted out of the OpenRouter envelope.
 def GenerateText(model: String, system_prompt: String, prompt: String) -> IO(String):
   do IO<String>:
     raw : String <- Generate(model, system_prompt, prompt)
     extract.generation(raw)
+
+# The token spend of a Generate call, from the same raw envelope — a reply
+# with no usage block reads as 0 rather than failing. Callers wanting both
+# the text and the spend bind the raw reply and extract each field.
+def GenerateUsage(raw: String) -> IO(Nat):
+  do IO<Nat>:
+    u : String <- extract.usage(raw)
+    IO.pure(Nat, Maybe.default(&2, Nat, Nat.read(String.trim(u)), 0n))
 
 # ------------------------------------------------------------------------------
 # The Tool Primitives
@@ -494,7 +512,8 @@ def demo_state() -> State:
     VPass{},
     ["agent_primitives.bend", "hello.bend"],
     ["greet:\nhello.bend:4:greet"],
-    5
+    5,
+    700n
   }
 
 def main() -> IO(Unit):
@@ -502,5 +521,5 @@ def main() -> IO(Unit):
     u1 : Unit <- IO.print(state_to_json(demo_state()))
     IO.print(json_str_list(bound.with(["aaa", "bbb", "ccc"], 4n)))
 
-#|{"directive":"add a greet function","program":{"step":"search_code","steps_done":["read_code"]},"observations":["[Search for 'greet']:\nhello.bend:4:greet"],"facts":{"changed_paths":["hello.bend"],"verification":"passed"},"index":{"paths":["agent_primitives.bend","hello.bend"],"search_hits":["greet:\nhello.bend:4:greet"]},"budget":{"steps_left":5}}
+#|{"directive":"add a greet function","program":{"step":"search_code","steps_done":["read_code"]},"observations":["[Search for 'greet']:\nhello.bend:4:greet"],"facts":{"changed_paths":["hello.bend"],"verification":"passed"},"index":{"paths":["agent_primitives.bend","hello.bend"],"search_hits":["greet:\nhello.bend:4:greet"]},"budget":{"steps_left":5,"tokens_used":700}}
 #|["...2 earlier entr(ies) dropped to fit the state budget ...","ccc"]
