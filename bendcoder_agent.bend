@@ -931,7 +931,7 @@ def agent_step(fuel: Nat, phase: Progress, +step_num: U32, +state: P.State) -> I
         u3 : Unit <- IO.print(U.color_cyan(U.rule()))
         +rest : Nat = p
         +state2 : P.State = apply_report(state, rep, U32.from_nat(Nat.add(1n, rest)))
-        +c_raw : String <- P.Classify(state2, S.questions())
+        +c_raw : String <- P.Classify(state2, S.questions(R.book_read_out(book)))
         +action : P.Answer <- P.ParseAnswer(c_raw, "action")
         blocked : P.Answer <- P.ParseAnswer(c_raw, "is_blocked")
         repeats : P.Answer <- P.ParseAnswer(c_raw, "repeats")

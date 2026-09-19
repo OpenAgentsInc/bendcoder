@@ -41,23 +41,36 @@ import ./reads.bend as R
 # ------------------------------------------------------------------------------
 # The question set
 # ------------------------------------------------------------------------------
-# One entry per field of LoopAnswers, in the same order. `apply_edit` is
-# offered so the risk gate has something to gate; the Bend loop still reports
-# it unimplemented when it is routed to.
-def questions() -> List<&2, P.Question>:
+# `read_code` is offered first while reads are live; once the picker's own
+# refusals say every remaining file is judged not worth reading it leaves the
+# list, so the action Choice must spend the step on an action that can act.
+def action_options.rest() -> List<&2, P.OptionPair>:
+  [
+    P.Opt{A.show_action(A.SearchCode{}), "Search the repository for a literal string to find which files are relevant"},
+    P.Opt{A.show_action(A.RunBuild{}), "Run build, compile, or test command to check if code works or reproduces an error"},
+    P.Opt{A.show_action(A.ApplyEdit{}), "Change the code on disk: the fix is understood and a concrete edit to a known file — or a whole new file — can be written now"},
+    P.Opt{A.show_action(A.GenerateAnswer{}), "Synthesize code, write a patch, or generate a fix using the LLM"},
+    P.Opt{A.show_action(A.TaskComplete{}), "The task is successfully resolved, verified, and complete"},
+    P.Opt{"none", "No listed action fits: the state does not yet support a next step"}
+  ]
+
+def action_options(+reads_out: Bool) -> List<&2, P.OptionPair>:
+  match reads_out:
+    case True{}:
+      action_options.rest()
+    case False{}:
+      P.Opt{A.show_action(A.ReadCode{}), "Read source code or repository files to understand context or inspect implementations"} <> action_options.rest()
+
+# One entry per field of LoopAnswers, in the same order. `reads_out` drops
+# `read_code` from the options when the file Choice has already refused every
+# remaining file — a picker cannot choose an action it is not offered, so the
+# loop stops spending steps converting read_code decisions into searches.
+def questions(+reads_out: Bool) -> List<&2, P.Question>:
   [
     P.ChoiceQ{
       "action",
       "Given `directive`, `program`, `observations` and `facts`, what is the single next best action to advance or verify the task?",
-      [
-        P.Opt{A.show_action(A.ReadCode{}), "Read source code or repository files to understand context or inspect implementations"},
-        P.Opt{A.show_action(A.SearchCode{}), "Search the repository for a literal string to find which files are relevant"},
-        P.Opt{A.show_action(A.RunBuild{}), "Run build, compile, or test command to check if code works or reproduces an error"},
-        P.Opt{A.show_action(A.ApplyEdit{}), "Change the code on disk: the fix is understood and a concrete edit to a known file — or a whole new file — can be written now"},
-        P.Opt{A.show_action(A.GenerateAnswer{}), "Synthesize code, write a patch, or generate a fix using the LLM"},
-        P.Opt{A.show_action(A.TaskComplete{}), "The task is successfully resolved, verified, and complete"},
-        P.Opt{"none", "No listed action fits: the state does not yet support a next step"}
-      ]
+      action_options(reads_out)
     },
     P.NoulQ{
       "is_blocked",
@@ -246,7 +259,7 @@ def floor_out(a: A.Action) -> Route:
 def route.gate(under: Bool, spent: Bool, rep: Bool, risky: Bool, stuck: Bool, blind_edit: Bool, blind_answer: Bool, read_dead: Bool, a: A.Action) -> Route:
   match under spent rep risky stuck blind_edit blind_answer read_dead:
     case _ _ _ _ _ _ _ True{}:
-      Skip{"the file Choice keeps declining — every remaining file is judged not worth reading; searching instead"}
+      Skip{"the file Choice keeps declining — every remaining file is judged not worth reading"}
     case True{} False{} _ _ _ _ _ _:
       Reread{"action confidence is under the floor; re-read or ask instead of acting"}
     case True{} True{} _ _ _ _ _ _:
@@ -682,7 +695,7 @@ def anchor_route(+choice: P.Answer, +noul: P.Answer) -> AnchorRoute:
 # of every other row
 law Selector.dead_read_seeks:
   for a: A.Action
-  {route.gate(True{}, False{}, False{}, False{}, False{}, False{}, False{}, True{}, a) == Skip{"the file Choice keeps declining — every remaining file is judged not worth reading; searching instead"} : Route}
+  {route.gate(True{}, False{}, False{}, False{}, False{}, False{}, False{}, True{}, a) == Skip{"the file Choice keeps declining — every remaining file is judged not worth reading"} : Route}
 def Selector.dead_read_seeks(a): {==}
 
 # LAW: confidence under the floor reroutes every action to a re-read
