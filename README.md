@@ -33,6 +33,50 @@ this is the context the agent has before it edits Bend.
 
 ---
 
+## Runbook
+
+**Setup.** Bend2 on PATH (`bend --version`; verified against 2.0.5, builds and
+runs cleanly on 2.0.9), `gcc`, `curl`. Keys for TypeSafe and OpenRouter either
+as `TYPESAFE_API_KEY` / `OPENROUTER_API_KEY` environment variables or as
+`.env.typesafe` / `.env.openrouter` files holding the raw key — not
+`KEY=value`, so a `KEY=value` secrets file must be sourced into the
+environment rather than copied. Both files are git-ignored.
+
+**Run.**
+
+```bash
+./run_bender.sh "Report which file defines the grep match cap."
+```
+
+`run_bender.sh` compiles `bender_agent.bend` to `bender_agent_bin` and runs it
+with `BENDER_GOAL` set from its arguments. `BENDER_MAX_STEPS` raises the
+6-step ceiling; `BENDER_VERIFY_CMD` points `apply_edit`'s verification at a
+different suite (default `./run_tests.sh`). Run against a clean tree: kept
+edits land in the working directory, and a failed verify restores the file —
+or removes it outright when the edit is what created it. A run ends
+`[TASK COMPLETED]`, `[STALLED]` on a guard trip, or at the step ceiling.
+
+**Verify.**
+
+```bash
+./run_tests.sh
+```
+
+The same gate every `apply_edit` must pass; run it after any change. No API
+keys needed — the suite is fully offline.
+
+**Delegate an issue.**
+
+```bash
+./delegate.sh 21 12        # issue 21 to Bender, 12-step budget
+./delegate-devin.sh 21     # the same contract via the Devin CLI
+./delegate-batch.sh 34 11  # several issues in parallel worktrees
+```
+
+`AGENTS.md` is this runbook written for agents working in the repo.
+
+---
+
 ## File Tools: `Read`, `Write`, `Edit`
 
 The three tools Bender uses to change code are ported from [`~/coder`](https://github.com/OpenAgentsInc/coder)
@@ -224,28 +268,26 @@ State -> Classify (TypeSafe) -> Calibrated Action -> Tool Execution -> State Upd
 Example run session:
 ```text
 ================================================================================
-  🤖 [BENDER] Autonomous Coding Agent (Bend2 + TypeSafe + OpenRouter)
+  [BENDER] Autonomous Coding Agent (Bend2 + TypeSafe + OpenRouter)
 ================================================================================
-🎯 [GOAL] Initial Objective: Inspect repository, verify hello.bend, and confirm autonomous capabilities...
+[GOAL] Initial Goal: Report which file defines the grep match cap. Do not edit any files.
+
+[INDEX] 37 repository paths injected into the state.
+--------------------------------------------------------------------------------
+[STEP 1] Evaluating State with Classify (TypeSafe System One)...
+--------------------------------------------------------------------------------
+[Classify Decision] search_code (confidence 0.95) (blocked 0.09, progress 0 (confidence 0.99))
+
+[TOOL SEARCH] Searching for 'MAX_MATCH' ...
+   tools_c.h-547-// everything else the agent had learned.
+   tools_c.h:548:#define BENDER_GREP_MAX_MATCHES 200
 
 --------------------------------------------------------------------------------
-📍 [STEP 1] Classifying State with TypeSafe System One (Jev)...
+[STEP 2] Evaluating State with Classify (TypeSafe System One)...
 --------------------------------------------------------------------------------
-🧠 [Classify Decision]: read_code (Confidence: 0.82, Probability: 0.87)
-📖 [TOOL READ] Reading 'hello.bend'...
+[Classify Decision] task_complete (confidence 0.72) (blocked 0.06, progress 0.9 (confidence 0.8))
 
---------------------------------------------------------------------------------
-📍 [STEP 2] Classifying State with TypeSafe System One (Jev)...
---------------------------------------------------------------------------------
-🧠 [Classify Decision]: run_build (Confidence: 0.98, Probability: 0.98)
-⚡ [TOOL EXEC] Running 'bend hello.bend'...
-   Output: Hello, world!
-
---------------------------------------------------------------------------------
-📍 [STEP 3] Classifying State with TypeSafe System One (Jev)...
---------------------------------------------------------------------------------
-🧠 [Classify Decision]: task_complete (Confidence: 0.73, Probability: 0.79)
-✅ [TASK COMPLETE] Bender confirmed all goals are verified and complete!
+[TASK COMPLETED] Bender verified all goals are met!
 ================================================================================
 ```
 
