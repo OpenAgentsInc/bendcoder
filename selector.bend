@@ -53,7 +53,7 @@ def questions() -> List<&2, P.Question>:
         P.Opt{A.show_action(A.ReadCode{}), "Read source code or repository files to understand context or inspect implementations"},
         P.Opt{A.show_action(A.SearchCode{}), "Search the repository for a literal string to find which files are relevant"},
         P.Opt{A.show_action(A.RunBuild{}), "Run build, compile, or test command to check if code works or reproduces an error"},
-        P.Opt{A.show_action(A.ApplyEdit{}), "Change the code on disk: the fix is understood and a concrete edit to a known file can be written now"},
+        P.Opt{A.show_action(A.ApplyEdit{}), "Change the code on disk: the fix is understood and a concrete edit to a known file — or a whole new file — can be written now"},
         P.Opt{A.show_action(A.GenerateAnswer{}), "Synthesize code, write a patch, or generate a fix using the LLM"},
         P.Opt{A.show_action(A.TaskComplete{}), "The task is successfully resolved, verified, and complete"},
         P.Opt{"none", "No listed action fits: the state does not yet support a next step"}

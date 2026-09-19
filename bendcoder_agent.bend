@@ -495,13 +495,26 @@ def applied(+res: String, +path: String, +backup: String, existed: Bool, +book: 
 
 # The snapshot is taken before the edit lands, so a refused apply or a
 # failed verify can put the file back the way the C loop does — and remove it
-# outright when the edit is what created it.
+# outright when the edit is what created it. A draft whose path does not
+# exist is a creation, not a replacement: the format's empty OLD marks it,
+# and it goes through WriteFile rather than an EditFile that could only
+# report the file missing.
+def apply_block.go(+path: String, old_str: String, new_str: String, existed: Bool, +book: R.Book) -> IO(Progress):
+  match existed:
+    case True{}:
+      do IO<Progress>:
+        u1 : Unit <- IO.print(U.color_magenta("   Editing '" ++ path ++ "' ..."))
+        backup : String <- P.ReadFile(path)
+        res : String <- P.EditFile(path, old_str, new_str)
+        applied(res, path, backup, existed, book)
+    case False{}:
+      do IO<Progress>:
+        u1 : Unit <- IO.print(U.color_magenta("   Creating '" ++ path ++ "' ..."))
+        res : String <- P.WriteFile(path, new_str)
+        applied(res, path, "", existed, book)
+
 def apply_block(+path: String, old_str: String, new_str: String, existed: Bool, +book: R.Book) -> IO(Progress):
-  do IO<Progress>:
-    u1 : Unit <- IO.print(U.color_magenta("   Editing '" ++ path ++ "' ..."))
-    backup : String <- P.ReadFile(path)
-    res : String <- P.EditFile(path, old_str, new_str)
-    applied(res, path, backup, existed, book)
+  apply_block.go(path, old_str, new_str, existed, book)
 
 # An edit to a file the agent has not read is a guess — the same refusal
 # bendcoder_agent.c applies ("has not been read yet"), and the file's name goes
