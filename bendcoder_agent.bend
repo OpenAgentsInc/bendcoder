@@ -7,6 +7,7 @@ import ./selector.bend as S
 import ./reads.bend as R
 import ./terms.bend as T
 import ./base_api.bend as B
+import ./plan.bend as W
 
 # ==============================================================================
 # Bendcoder: Autonomous Coding Agent Loop
@@ -38,6 +39,7 @@ type Report is Data:
     verify: Maybe<&2, P.Verif>,  # the outcome for `facts.verification`
     changed: List<&2, String>,   # paths for `facts.changed_paths`
     hits: List<&2, String>,      # entries for `index.search_hits`
+    plan: Maybe<&2, List<&2, W.Item>>, # the worklist a `plan` action seeded
     tokens: Nat                  # OpenRouter spend this step, total_tokens
   }
 
@@ -65,22 +67,27 @@ type Progress is Data:
 # "[label]:\nbody" entry the string state appended — the List<Step> of #14
 # renders into this slot when it lands.
 def rep.of(+label: String, +body: String) -> Report:
-  Rep{Some{"\n[" ++ label ++ "]:\n" ++ body}, None{}, None{}, Nil{}, Nil{}, 0n}
+  Rep{Some{"\n[" ++ label ++ "]:\n" ++ body}, None{}, None{}, Nil{}, Nil{}, None{}, 0n}
 
 # A search records its result under `index.search_hits` as well as in the
 # observations: the index is the retrieval a later question reads without
 # the model having to ask for it again.
 def rep.search(+label: String, +body: String, +hit: String) -> Report:
-  Rep{Some{"\n[" ++ label ++ "]:\n" ++ body}, None{}, None{}, Nil{}, [hit], 0n}
+  Rep{Some{"\n[" ++ label ++ "]:\n" ++ body}, None{}, None{}, Nil{}, [hit], None{}, 0n}
 
 def rep.verify(+label: String, +body: String, v: P.Verif) -> Report:
-  Rep{Some{"\n[" ++ label ++ "]:\n" ++ body}, None{}, Some{v}, Nil{}, Nil{}, 0n}
+  Rep{Some{"\n[" ++ label ++ "]:\n" ++ body}, None{}, Some{v}, Nil{}, Nil{}, None{}, 0n}
 
 def rep.edited(+label: String, +body: String, v: P.Verif, +path: String) -> Report:
-  Rep{Some{"\n[" ++ label ++ "]:\n" ++ body}, None{}, Some{v}, [path], Nil{}, 0n}
+  Rep{Some{"\n[" ++ label ++ "]:\n" ++ body}, None{}, Some{v}, [path], Nil{}, None{}, 0n}
+
+# A `plan` action's report: the parsed worklist joins the state beside the
+# observation that shows it, so the next Classify sees what is owed.
+def rep.planned(+label: String, +body: String, +items: List<&2, W.Item>) -> Report:
+  Rep{Some{"\n[" ++ label ++ "]:\n" ++ body}, None{}, None{}, Nil{}, Nil{}, Some{items}, 0n}
 
 def rep.empty() -> Report:
-  Rep{None{}, None{}, None{}, Nil{}, Nil{}, 0n}
+  Rep{None{}, None{}, None{}, Nil{}, Nil{}, None{}, 0n}
 
 # rep.note prepends a line to the observation (the search-stuck nudge);
 # rep.act stamps the action that ran, which is known at dispatch, not where
@@ -94,13 +101,13 @@ def rep.obs.pre(+obs: Maybe<&2, String>, +note: String) -> Maybe<&2, String>:
 
 def rep.note(+r: Report, +note: String) -> Report:
   match r:
-    case Rep{+obs, +act, +verify, +changed, +hits, +toks}:
-      Rep{rep.obs.pre(obs, note), act, verify, changed, hits, toks}
+    case Rep{+obs, +act, +verify, +changed, +hits, +plan, +toks}:
+      Rep{rep.obs.pre(obs, note), act, verify, changed, hits, plan, toks}
 
 def rep.act(+r: Report, +name: String) -> Report:
   match r:
-    case Rep{+obs, act, +verify, +changed, +hits, +toks}:
-      Rep{obs, Some{name}, verify, changed, hits, toks}
+    case Rep{+obs, act, +verify, +changed, +hits, +plan, +toks}:
+      Rep{obs, Some{name}, verify, changed, hits, plan, toks}
 
 def acted(+name: String, p: Progress) -> Progress:
   match p:
@@ -114,8 +121,8 @@ def acted(+name: String, p: Progress) -> Progress:
 # is built deep inside the handler it called.
 def rep.tok(+r: Report, +n: Nat) -> Report:
   match r:
-    case Rep{+obs, +act, +verify, +changed, +hits, +toks}:
-      Rep{obs, act, verify, changed, hits, Nat.add(toks, n)}
+    case Rep{+obs, +act, +verify, +changed, +hits, +plan, +toks}:
+      Rep{obs, act, verify, changed, hits, plan, Nat.add(toks, n)}
 
 def tokenized(p: Progress, +n: Nat) -> Progress:
   match p:
@@ -180,11 +187,22 @@ def verif_or(+cur: P.Verif, m: Maybe<&2, P.Verif>) -> P.Verif:
     case None{}:
       cur
 
+# The worklist's fold: an unchecked item naming a file this step's report
+# left changed checks off (#45) — progress is marked on the data itself, so
+# the next step renders what is done and what is left rather than the model
+# re-deriving it. A `plan` action's own report replaces the list outright.
+def plan_or(+cur: List<&2, W.Item>, m: Maybe<&2, List<&2, W.Item>>) -> List<&2, W.Item>:
+  match m:
+    case Some{+v}:
+      v
+    case None{}:
+      cur
+
 # The state transition itself: one report folded in, newest entries last.
 def apply_report(s: P.State, r: Report, +left: U32) -> P.State:
   match s r:
-    case P.St{directive, +step, done, obs, changed, verif, paths, base, hits, _, +toks}
-         Rep{nobs, +nact, nver, nchanged, nhits, ntok}:
+    case P.St{directive, +step, done, obs, changed, verif, paths, base, hits, _, +toks, plan}
+         Rep{nobs, +nact, nver, +nchanged, nhits, nplan, ntok}:
       P.St{
         directive,
         step_or(step, nact),
@@ -196,7 +214,8 @@ def apply_report(s: P.State, r: Report, +left: U32) -> P.State:
         base,
         List.append(&2, String, hits, nhits),
         left,
-        Nat.add(toks, ntok)}
+        Nat.add(toks, ntok),
+        plan_or(W.mark(plan, nchanged), nplan)}
 
 # One tool result, both shown and remembered: the label/body pair is what the
 # person watching sees; the Report is what the loop's state learns. The Book
