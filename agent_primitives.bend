@@ -393,7 +393,7 @@ def Classify(state: State, questions: List<&2, Question>) -> IO(String):
 # ------------------------------------------------------------------------------
 # Build OpenAI-compatible chat completion payload
 def build_generate_payload(model: String, system_prompt: String, prompt: String) -> String:
-  "{\"model\":\"" ++ json_escape(model) ++ "\",\"messages\":[{\"role\":\"system\",\"content\":\"" ++ json_escape(system_prompt) ++ "\"},{\"role\":\"user\",\"content\":\"" ++ json_escape(prompt) ++ "\"}]}"
+  "{\"model\":\"" ++ json_escape(model) ++ "\",\"store\":false,\"messages\":[{\"role\":\"system\",\"content\":\"" ++ json_escape(system_prompt) ++ "\"},{\"role\":\"user\",\"content\":\"" ++ json_escape(prompt) ++ "\"}]}"
 
 # Generate takes a model identifier, system prompt, and user prompt.
 # It dispatches the request to OpenRouter (or configured OpenAI-compatible endpoint).
