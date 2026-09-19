@@ -236,5 +236,14 @@ while [ -n "$queue" ]; do
 done
 sort -u "$SEEN" | sed 's/^/COVERED: /'
 
+# The manifest's complement is the check: a source file no check reaches has
+# no gate — which is how a created .bend stub once "passed" verification while
+# implementing nothing (#40). Any .bend/.c/.h absent from COVERED fails here.
+for f in *.bend *.c *.h; do
+  [ -f "$f" ] || continue
+  git check-ignore -q "$f" && continue
+  grep -qxF "$f" "$SEEN" || { echo "UNCOVERED: $f -- no check in this suite reaches it"; exit 1; }
+done
+
 echo
 echo "All checks passed."
