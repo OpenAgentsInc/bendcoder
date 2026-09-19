@@ -117,3 +117,7 @@ records — those all landed or were drafted by the agent itself.
 - `#40`, `#41` — implemented manually after the boundaries above were
   mapped (`96d39b7`, `7fb8e24`); the loop fixes each delegation exposed
   are the agent's real yield from those runs.
+
+`docs/roadmap.md` carries the follow-on assessment — why these are the
+boundaries, what the limiting factors actually are, and the ordered
+upgrade path tracked as issues #42–#48.
