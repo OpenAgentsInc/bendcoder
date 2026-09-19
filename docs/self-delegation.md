@@ -52,6 +52,7 @@ Each of these was found by watching a delegation fail, not by review:
 | Model pattern-matched the issue's Rust references and drafted `env::var` | Generation prompts now state the repo is Bend2 + C; issue text names the target files explicitly |
 | `==`/`&&`/`||`/`String.equals` in every Bend draft | README's Bend Constraints names the trap; the same constraint rides in the draft prompts |
 | Weak `apply_edit` after a failed verify rerouted instead of retrying | `S.answer_retry_edit`: a failed `facts.verification` lets an under-floor `apply_edit` act on the error already in the state, and it does not count as a flail-reroute |
+| A draft pasted a numbered diff hunk into a heredoc; the `87\t`-prefixed terminator never matched, `cat` swallowed the rest of `run_tests.sh` into the prelude, and the script exited 0 having verified almost nothing | The `SUITEPASS` trap: the suite sets the flag only at its final line, so any earlier exit — a swallowed script, a truncation, a stray `exit 0` — fails loudly instead of self-certifying |
 
 Plus two knobs that make experiments cheap: `BENDCODER_MODEL` overrides the
 generation model per run, and `BENDCODER_MAX_STEPS` sets the budget.
@@ -88,7 +89,31 @@ could not emit the code. The implementation was landed manually (`96d39b7`).
   single-function Bend edits; "new module" is the failure shape, so issues
   should be sized to the demonstrated envelope until it grows.
 
-## What's left
+## The second boundary: wide mechanical threading
 
-- `#41` token-usage extraction — delegated; C-side `usage.total_tokens`
-  plus a counter through the state, inside the demonstrated envelope.
+Issue #41 (token usage into `budget`) was not a novel-authoring problem —
+it was ~10 mechanical touch points across 4 files (a new FFI extractor, a
+field on both `State` and `Report`, every pattern match, the render, the
+suite prelude). At 20 steps the one draft was correctly refused (edit to an
+unread file) and Jev never re-proposed; at 40 it landed one hunk of ten and
+corrupted the suite itself in the process — the numbered-heredoc paste the
+`SUITEPASS` trap now guards against. Field-threading is the kind of change
+a human calls tedious; at ~5-8 steps per propose→anchor→read→draft→verify
+cycle it does not fit a 40-step budget either. Two distinct walls, then:
+
+1. **Novel recursive pure-Bend modules** — outside the generation model's
+   current ability at any budget tried (#40).
+2. **Multi-file field-threading** — within its ability per-hunk, outside
+   the fuel budget a delegation reasonably gets (#41).
+
+What remains squarely inside the envelope: single-file C edits, focused
+single-site Bend changes, and every loop-hardening fix this document
+records — those all landed or were drafted by the agent itself.
+
+## What landed where
+
+- `#38`, `#39` — delegated, applied and verified by the agent (`612e58f`,
+  `e169b8e`).
+- `#40`, `#41` — implemented manually after the boundaries above were
+  mapped (`96d39b7`, `7fb8e24`); the loop fixes each delegation exposed
+  are the agent's real yield from those runs.
