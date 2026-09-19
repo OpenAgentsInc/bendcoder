@@ -292,6 +292,86 @@ rather than converging — a failed draft is rolled back and resampled instead
 of repaired, and no plan object carries progress between hunks), and the
 ordered upgrade path is tracked as issues #42–#48.
 
+## How it compares to frontier coding agents
+
+Bendcoder is a narrow agent measured against a general one — a
+Devin/Claude-Code-class tool with a frontier model, arbitrary tools and a
+long context. The comparison is worth spelling out because the gap
+decomposes cleanly: everything Bendcoder does well is where the design
+constrained the model, and everything it does poorly is where it asked a
+small model to be a big one.
+
+### Where it is structurally stronger
+
+A few properties are guarantees, not conventions.
+
+- **It cannot fabricate `old_string` on the anchor path.** Jev picks a
+  file, a window and a line id from Choices; code slices the exact bytes
+  out of the file. A general agent writes `old_string` from memory and
+  can produce near-misses that refuse — here the wrong text is
+  unrepresentable, not merely refused.
+- **Every landed change is verified or gone.** Apply → suite → keep or
+  roll back, and the suite cannot self-certify (SUITEPASS,
+  coverage-complement). A general agent's edits are verified when it
+  chooses to check them; Bendcoder's are verified by construction.
+- **Its decisions are calibrated and inspectable.** Every step yields
+  typed answers with probabilities, routed by a table whose thresholds
+  record what they were measured on. A general agent's confidence is
+  prose; Bendcoder's is a number per step.
+- **Its loop is a total function.** `agent_step` must structurally
+  decrease on `fuel` — termination is checked by the language, backed by
+  the flail halt and stall reasons. General agent loops rely on
+  heuristics and timeouts.
+- **Its memory is small typed data.** The `Book` — read cursors, miss
+  runs, declined picks, the under-floor tally — can be read directly to
+  see why a step rerouted. A general agent's memory is a context blob.
+- **The path guard is proved.** `LAWS.bend`/`PROOF.bend` fill the refusal
+  laws — "stays in the repo" is a proof obligation, not a comment.
+- **Its failures are loud.** `[STALLED]` with a reason, rolled-back edits
+  with the compiler error in the state, a suite that refuses to pass when
+  it did not finish. The dangerous agent failure mode — confident, wrong,
+  silent — is the one it does not have.
+
+### Where it is weaker
+
+- **The generator is a small model.** `gpt-oss-120b` cannot author a
+  ~100-line recursive pure-Bend module even with a correct plan and
+  explicit hints (#40 took ~8 failed runs). A frontier model emits that
+  module in one shot. Raw capability, not loop design.
+- **It samples; it does not repair.** A failed draft is rolled back and
+  re-drafted from scratch rather than patched in place (#42).
+- **No plan object.** Nothing in the state says "you are 3 of 10 hunks
+  through this change," so it re-orients between hunks (#45). A general
+  agent carries an explicit task list; Bendcoder's only plan is the
+  static issue text.
+- **One hunk per edit, the full suite per hunk.** Each `apply_edit` is a
+  single group plus a minute-or-more verify; a general agent does a
+  10-site refactor in one edit and a targeted check in seconds (#43).
+- **The action space is closed.** Six actions; `run_build` is the suite.
+  No `git log`, no scratch scripts, no `gh` — a general agent composes
+  arbitrary shell, which is most of its debugging power.
+- **Its context is bounded.** ~32 KB of observations, oldest dropped;
+  nuanced reasoning evaporates where a general agent holds the session.
+- **Its grep cannot see the standard library.** `P.Grep(".")` only, so it
+  invents API names against an invisible base.bend (#44).
+- **No external information and no asking for help.** If the answer is
+  not in the repo it does not exist, and a stall is terminal — there is
+  no "ask the user" action.
+- **Calibration costs steps.** Even when the model knows what to do, a
+  0.31 confidence gates it into reroutes; the refused-edit-then-abandon
+  failure (#46) is the price of gating on a small model's confidence.
+
+### The honest bottom line
+
+Bendcoder is a real agent — it has autonomously landed verified changes to
+itself — but a narrow one: repo-local, verifiable, single-site edits sized
+to a small model's generation envelope. A frontier agent is general:
+multi-file, long-horizon, arbitrary tools, external information, and a
+model that can simply write the code. The roadmap (issues #42–#45) is
+precisely "give it the machinery a big-context agent has implicitly" — a
+repair loop, cheap checks, a visible stdlib, a plan object — bolted onto a
+loop that, unlike a general agent's, can prove things about itself.
+
 ## The agent
 
 `bendcoder_agent.bend` is the agent `run_bendcoder.sh` builds and runs — the whole
