@@ -902,7 +902,7 @@ def run_answers(+answers: S.LoopAnswers, +state: P.State, +book: R.Book, last: B
           ", progress " ++ answer_note(progress) ++ ")"))
         u2 : Unit <- IO.print("")
         run_route(
-          S.route(answers, R.book_unread(book), R.book_stuck(book), spent, R.book_read_out(book)),
+          S.route(answers, R.book_unread(book), R.book_stuck(book), spent, R.book_read_out(book), P.state_verify_failed(state)),
           state, book,
           Bool.and(last, Bool.not(P.state_did(state, "generate_answer"))))
 
@@ -958,7 +958,13 @@ def agent_step(fuel: Nat, phase: Progress, +step_num: U32, +state: P.State) -> I
         +under : Bool = S.answer_under(action)
         +spent : Bool = R.book_spent(book)
         +will_act : Bool = Bool.and(under, Bool.and(spent, S.floor_acts_answer(action)))
-        +rerouted : Bool = Bool.and(under, Bool.not(will_act))
+        # A retry-edit — apply_edit proposed while the last verify stands
+        # failed — acts on the error already in the state rather than
+        # rerouting; it is an acted decision, not a reroute, so it does not
+        # bump the under-floor run either.
+        +rerouted : Bool = Bool.and(under, Bool.and(
+          Bool.not(will_act),
+          Bool.not(S.answer_retry_edit(action, P.state_verify_failed(state2)))))
         next : Progress <- step_decide(
           R.book_flailing(book, rerouted),
           S.Ans{action, blocked, repeats, asked, risk, progress},

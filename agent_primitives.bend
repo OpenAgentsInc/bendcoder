@@ -331,6 +331,21 @@ def state_listing(s: State) -> String:
     case St{directive, step, done, obs, changed, verification, +paths, hits, left}:
       String.join(paths, "\n")
 
+# Whether the last recorded verification failed — the signal that a proposed
+# apply_edit is a retry informed by an error already in the state rather than
+# a fresh uninformed draft.
+def state_verify_failed.go(+v: Verif) -> Bool:
+  match v:
+    case VFail{}:
+      True{}
+    case _:
+      False{}
+
+def state_verify_failed(s: State) -> Bool:
+  match s:
+    case St{directive, step, done, obs, changed, +verification, paths, hits, left}:
+      state_verify_failed.go(verification)
+
 # Whether the program already ran the named action — the final_answer flag
 # bendcoder_agent.c keeps beside its state, which the end-of-fuel answer force
 # tests before overriding the route.
