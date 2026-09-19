@@ -239,10 +239,19 @@ def act_search_code.go(+pattern: String, +book: R.Book, already: Bool) -> IO(Pro
 def act_search_code.check(state: P.State, +pattern: String, +book: R.Book) -> IO(Progress):
   act_search_code.go(pattern, book, String.contains(P.state_text(state), "Search for '" ++ pattern ++ "'"))
 
+# The generation model is a run knob — BENDCODER_MODEL names the OpenRouter
+# model for every GenerateText call; unset or empty keeps the default.
+def gen_model() -> IO(String):
+  do IO<String>:
+    env : Result<&1, &1, U32 & String, String> <- IO.get_env("BENDCODER_MODEL")
+    +m : String = Result.default(&1, &1, U32 & String, String, env, "openai/gpt-oss-120b:nitro")
+    IO.pure(String, Bool.pick(String, String.is_empty(String.trim(m)), "openai/gpt-oss-120b:nitro", m))
+
 def act_search_code(+state: P.State, +book: R.Book) -> IO(Progress):
   do IO<Progress>:
+    m : String <- gen_model()
     reply : String <- P.GenerateText(
-      "openai/gpt-oss-120b:nitro",
+      m,
       "You choose one literal search string. Reply with the string alone, nothing else.",
       "State:\n" ++ P.state_text(state) ++ "\nGive one literal string to search this repository for. Not a regular expression. A fragment of the right name beats a full guess at it."
     )
@@ -398,8 +407,9 @@ def act_read_code(+state: P.State, +book: R.Book) -> IO(Progress):
 def act_generate_answer(+state: P.State, +book: R.Book) -> IO(Progress):
   do IO<Progress>:
     u1 : Unit <- IO.print(U.color_magenta("[TOOL GENERATE] Calling LLM (OpenRouter) to generate code ..."))
+    m : String <- gen_model()
     gen : String <- P.GenerateText(
-      "openai/gpt-oss-120b:nitro",
+      m,
       "You are Bendcoder, an autonomous coding agent written in Bend2. Your repository's sources are Bend2 (.bend) and C (.c/.h) only -- the goal may quote a reference implementation in another language, but every change you propose lands in this repository's own files. Produce concise, direct code.",
       "State:\n" ++ P.state_text(state) ++ "\nTask: Describe the single next change that would advance this goal, naming the repository file it lands in."
     )
@@ -554,8 +564,9 @@ def act_apply_edit(e: E.Edit, +book: R.Book) -> IO(Progress):
 def draft_apply_edit(+state: P.State, +book: R.Book) -> IO(Progress):
   do IO<Progress>:
     u1 : Unit <- IO.print(U.color_magenta("[TOOL EDIT] Drafting an edit via OpenRouter ..."))
+    m : String <- gen_model()
     reply : String <- P.GenerateText(
-      "openai/gpt-oss-120b:nitro",
+      m,
       E.edit_format_system(),
       "State so far:\n" ++ P.state_text(state))
     act_apply_edit(E.parse_edit(reply), book)
@@ -651,8 +662,9 @@ def anchor_fallback(+reason: String, +state: P.State, +book: R.Book) -> IO(Progr
 def anchor_generate(+state: P.State, +path: String, +line: U32, +old_str: String, +book: R.Book) -> IO(Progress):
   do IO<Progress>:
     u1 : Unit <- IO.print(U.color_magenta("[TOOL GENERATE] Writing replacement text for " ++ path ++ " around line " ++ U32.show(line) ++ " ..."))
+    m : String <- gen_model()
     reply : String <- P.GenerateText(
-      "openai/gpt-oss-120b:nitro",
+      m,
       new_format_system(),
       "State so far:\n" ++ P.state_text(state) ++ "\n\nThe change anchors at line " ++ U32.show(line) ++ " of " ++ path ++ ". The exact existing text to replace is:\n" ++ old_str ++ "\nWrite the replacement text and nothing else.")
     apply_block(path, old_str, extract_new_str(reply), True{}, book)
