@@ -2,7 +2,8 @@ import Base
 
 # ==============================================================================
 # reads.bend: the loop's read bookkeeping — per-file cursors, the pending read
-# a refused edit names, and the Book that carries them between steps
+# a refused edit names and the record that the named read landed, and the
+# Book that carries them between steps
 # ==============================================================================
 # bendcoder_agent.c keeps this in globals: read_cursors[], pending_read and
 # search_miss_run. Bend has no globals, so the same record travels inside the
@@ -26,7 +27,9 @@ type ReadMark is Data:
 # floor's spent check and the flail halt both read. bendcoder_agent.c's
 # low_confidence_run. `skips` counts consecutive declined file picks — the
 # read picker's Choice judging that no remaining file is worth reading,
-# which the read-exhaustion route reads.
+# which the read-exhaustion route reads. `met` is `want` discharged: the
+# named path kept once its read has landed, which is the record the
+# under-floor edit rule reads — the refused edit's precondition is satisfied.
 type Book is Data:
   Bk{
     misses: U32,
@@ -34,44 +37,46 @@ type Book is Data:
     want: Maybe<&2, String>,
     read_once: Bool,
     low: U32,
-    skips: U32
+    skips: U32,
+    met: Maybe<&2, String>
   }
 
 def book.new() -> Book:
-  Bk{0, {Nil{} : List<&2, ReadMark>}, None{}, False{}, 0, 0}
+  Bk{0, {Nil{} : List<&2, ReadMark>}, None{}, False{}, 0, 0, None{}}
 
 # The consecutive-miss run a non-search report always ends.
 def book_acted(+b: Book) -> Book:
   match b:
-    case Bk{misses, +reads, +want, +ro, +low, +skips}:
-      Bk{0, reads, want, ro, low, skips}
+    case Bk{misses, +reads, +want, +ro, +low, +skips, +met}:
+      Bk{0, reads, want, ro, low, skips, met}
 
 # A missed search: the run grows by one, the rest of the book untouched.
 def book_missed(+b: Book) -> Book:
   match b:
-    case Bk{+misses, +reads, +want, +ro, +low, +skips}:
-      Bk{U32.inc(misses), reads, want, ro, low, skips}
+    case Bk{+misses, +reads, +want, +ro, +low, +skips, +met}:
+      Bk{U32.inc(misses), reads, want, ro, low, skips, met}
 
 # A declined file pick: Jev looked at the remaining options and named none
 # of them, which is a read event — the search-miss run ends and the skip
 # run grows.
 def book_declined(+b: Book) -> Book:
   match b:
-    case Bk{misses, +reads, +want, +ro, +low, +skips}:
-      Bk{0, reads, want, ro, low, U32.inc(skips)}
+    case Bk{misses, +reads, +want, +ro, +low, +skips, +met}:
+      Bk{0, reads, want, ro, low, U32.inc(skips), met}
 
 # A refused blind edit names the file it needed: the next read serves it
-# rather than asking again — pending_read in bendcoder_agent.c.
+# rather than asking again — pending_read in bendcoder_agent.c. A fresh
+# refusal is a new precondition, so a previous `met` clears with it.
 def book_want(+b: Book, +path: String) -> Book:
   match b:
-    case Bk{misses, +reads, want, +ro, +low, +skips}:
-      Bk{0, reads, Some{path}, ro, low, skips}
+    case Bk{misses, +reads, want, +ro, +low, +skips, met}:
+      Bk{0, reads, Some{path}, ro, low, skips, None{}}
 
 # The marks, for the read picker's done set and the blind-edit guard's
 # read_cursor_find.
 def book_marks(+b: Book) -> List<&2, ReadMark>:
   match b:
-    case Bk{misses, +reads, want, ro, low, skips}:
+    case Bk{misses, +reads, want, ro, low, skips, met}:
       reads
 
 # The flail counter: a decision under its consequence-weighted floor that
@@ -79,10 +84,10 @@ def book_marks(+b: Book) -> List<&2, ReadMark>:
 # clears it. low_confidence_run in bendcoder_agent.c.
 def book_tally(+b: Book, under: Bool) -> Book:
   match b under:
-    case Bk{+misses, +reads, +want, +ro, +l, +skips} True{}:
-      Bk{misses, reads, want, ro, U32.inc(l), skips}
-    case Bk{+misses, +reads, +want, +ro, l, +skips} False{}:
-      Bk{misses, reads, want, ro, 0, skips}
+    case Bk{+misses, +reads, +want, +ro, +l, +skips, +met} True{}:
+      Bk{misses, reads, want, ro, U32.inc(l), skips, met}
+    case Bk{+misses, +reads, +want, +ro, l, +skips, +met} False{}:
+      Bk{misses, reads, want, ro, 0, skips, met}
 
 # Consecutive under-floor decisions the loop tolerates before it stops —
 # BENDCODER_MAX_LOW_CONFIDENCE. Kept beside the counter it compares against.
@@ -92,7 +97,7 @@ def low_limit() -> U32: 3
 # the caller's `under` is this step's, so the check sees the run including it.
 def book_flailing(+b: Book, under: Bool) -> Bool:
   match b under:
-    case Bk{misses, reads, want, ro, +l, skips} True{}:
+    case Bk{misses, reads, want, ro, +l, skips, met} True{}:
       U32.is_ge(U32.inc(l), low_limit())
     case _ _:
       False{}
@@ -108,7 +113,7 @@ def floor_reads() -> U32: 2
 # third under-floor decision acts.
 def book_spent(+b: Book) -> Bool:
   match b:
-    case Bk{misses, reads, want, ro, +l, skips}:
+    case Bk{misses, reads, want, ro, +l, skips, met}:
       U32.is_ge(l, floor_reads())
 
 # Declined picks before reads count as exhausted. One decline may be a
@@ -130,7 +135,7 @@ def book_read_out.go(+want: Maybe<&2, String>, +skips: U32) -> Bool:
 
 def book_read_out(+b: Book) -> Bool:
   match b:
-    case Bk{misses, reads, +want, ro, low, +skips}:
+    case Bk{misses, reads, +want, ro, low, +skips, met}:
       book_read_out.go(want, skips)
 
 # "the head of xs is a mark for path" — the computed scrutinee the walks
@@ -208,29 +213,65 @@ def rd_done(+xs: List<&2, ReadMark>) -> List<&2, String>:
 def str_member(+xs: List<&2, String>, +s: String) -> Bool:
   List.contains(~String, ~String.eq, xs, s)
 
+# A pending want discharged by a read of the path it names: the served page
+# (or the anchor's full read) is the read the refused edit asked for, so the
+# want clears and the path moves to `met` — the record, kept between steps,
+# that a refused edit's precondition has since been satisfied. A read of any
+# other path leaves both alone. The equality arrives computed, the way every
+# match-on-computed in this codebase is split.
+def want_out.of(+w: String, eq: Bool) -> Maybe<&2, String>:
+  match eq:
+    case True{}:
+      None{}
+    case False{}:
+      Some{w}
+
+def want_out(+want: Maybe<&2, String>, +path: String) -> Maybe<&2, String>:
+  match want:
+    case Some{+w}:
+      want_out.of(w, String.eq(w, path))
+    case None{}:
+      None{}
+
+def met_of.eq(+w: String, +old: Maybe<&2, String>, eq: Bool) -> Maybe<&2, String>:
+  match eq:
+    case True{}:
+      Some{w}
+    case False{}:
+      old
+
+def met_of(+want: Maybe<&2, String>, +path: String, +old: Maybe<&2, String>) -> Maybe<&2, String>:
+  match want:
+    case Some{+w}:
+      met_of.eq(w, old, String.eq(w, path))
+    case None{}:
+      old
+
 # A page served: the cursor advances or the file is marked done, read_once
-# sets, the pending read clears, and the miss and skip runs end — a served
-# pick is the option list answering, read_code is not search_code, and
-# pending_read clears before the page serves in C.
+# sets, the miss and skip runs end — a served pick is the option list
+# answering, and read_code is not search_code — and a pending `want` naming
+# this path discharges into `met`, pending_read's landing in
+# bendcoder_agent.c.
 def book_served(+b: Book, +path: String, next: U32, done: Bool) -> Book:
   match b:
-    case Bk{misses, +reads, want, ro, +low, skips}:
-      Bk{0, rd_put(reads, path, next, done), None{}, True{}, low, 0}
+    case Bk{misses, +reads, +want, ro, +low, skips, +met}:
+      Bk{0, rd_put(reads, path, next, done), want_out(want, path), True{}, low, 0, met_of(want, path, met)}
 
 # The phase-0 listing+README read serves no tracked page — bendcoder_agent.c's
 # first read creates no cursor — but it still counts as a read for the
 # route guards and ends the miss run.
 def book_phase0(+b: Book) -> Book:
   match b:
-    case Bk{misses, +reads, +want, ro, +low, +skips}:
-      Bk{0, reads, want, True{}, low, skips}
+    case Bk{misses, +reads, +want, ro, +low, +skips, +met}:
+      Bk{0, reads, want, True{}, low, skips, met}
 
 # The anchor path reads its target in full: a mark set to done, the
-# blind-edit guard's intent met and the read picker stops offering it.
+# blind-edit guard's intent met and the read picker stops offering it — and
+# a want naming it discharges the same way a served page does.
 def book_exhaust(+b: Book, +path: String, next: U32) -> Book:
   match b:
-    case Bk{misses, +reads, +want, ro, +low, +skips}:
-      Bk{0, rd_put(reads, path, next, True{}), want, ro, low, skips}
+    case Bk{misses, +reads, +want, ro, +low, +skips, +met}:
+      Bk{0, rd_put(reads, path, next, True{}), want_out(want, path), ro, low, skips, met_of(want, path, met)}
 
 # Enough consecutive search misses to turn a search into a read —
 # BENDCODER_SEARCH_MISS_LIMIT. Kept beside the counter it compares against.
@@ -240,15 +281,30 @@ def miss_limit() -> U32: 2
 # missing is not converging, and a read can only add information.
 def book_stuck(+b: Book) -> Bool:
   match b:
-    case Bk{+misses, reads, want, ro, low, skips}:
+    case Bk{+misses, reads, want, ro, low, skips, met}:
       U32.is_ge(misses, miss_limit())
 
 # Whether no read_code has run yet — read_phase == 0 in the C loop, which is
 # what the "only drafted against code already read" guard rows test.
 def book_unread(+b: Book) -> Bool:
   match b:
-    case Bk{misses, reads, want, +ro, low, skips}:
+    case Bk{misses, reads, want, +ro, low, skips, met}:
       Bool.not(ro)
+
+# Whether a refused edit's named read has landed — the precondition the
+# selector's under-floor edit rule reads: a `met` path means the read the
+# floor exists to buy has already been bought, so a weak apply_edit may act.
+def book_met.go(m: Maybe<&2, String>) -> Bool:
+  match m:
+    case Some{p}:
+      True{}
+    case None{}:
+      False{}
+
+def book_met(+b: Book) -> Bool:
+  match b:
+    case Bk{misses, reads, want, ro, low, skips, +met}:
+      book_met.go(met)
 
 # Whether a mark exists for path — read_cursor_find's "was it read at all",
 # which read_cursor_for cannot answer since it always returns one.
@@ -344,24 +400,29 @@ def main() -> IO(Unit):
     u8 : Unit <- IO.print("done -> " ++ String.join(rd_done(m4), ","))
     u9 : Unit <- IO.print("member -> " ++ Bool.pick(String, str_member(["a", "b"], "b"), "yes", "no"))
     u10 : Unit <- IO.print("nonmember -> " ++ Bool.pick(String, str_member(["a", "b"], "z"), "yes", "no"))
-    u11 : Unit <- IO.print("stuck 2 -> " ++ Bool.pick(String, book_stuck(Bk{2, m4, None{}, True{}, 0, 0}), "yes", "no"))
-    u12 : Unit <- IO.print("stuck 1 -> " ++ Bool.pick(String, book_stuck(Bk{1, m4, None{}, True{}, 0, 0}), "yes", "no"))
+    u11 : Unit <- IO.print("stuck 2 -> " ++ Bool.pick(String, book_stuck(Bk{2, m4, None{}, True{}, 0, 0, None{}}), "yes", "no"))
+    u12 : Unit <- IO.print("stuck 1 -> " ++ Bool.pick(String, book_stuck(Bk{1, m4, None{}, True{}, 0, 0, None{}}), "yes", "no"))
     u13 : Unit <- IO.print("unread -> " ++ Bool.pick(String, book_unread(book.new()), "yes", "no"))
-    u14 : Unit <- IO.print("read -> " ++ Bool.pick(String, book_unread(Bk{0, m4, None{}, True{}, 0, 0}), "yes", "no"))
+    u14 : Unit <- IO.print("read -> " ++ Bool.pick(String, book_unread(Bk{0, m4, None{}, True{}, 0, 0, None{}}), "yes", "no"))
     u15 : Unit <- IO.print("has a.c -> " ++ Bool.pick(String, rd_has(m4, "a.c"), "yes", "no"))
     u16 : Unit <- IO.print("has z.c -> " ++ Bool.pick(String, rd_has(m4, "z.c"), "yes", "no"))
     +b1 : Book = book_want(book.new(), "a.c")
     +b2 : Book = book_served(b1, "a.c", 201, False{})
     u17 : Unit <- IO.print("served -> " ++ show_marks(book_marks(b2)) ++ " | unread " ++ Bool.pick(String, book_unread(b2), "yes", "no"))
-    +b3 : Book = book_tally(Bk{0, m4, None{}, True{}, 2, 0}, True{})
+    +b3 : Book = book_tally(Bk{0, m4, None{}, True{}, 2, 0, None{}}, True{})
     u18 : Unit <- IO.print("flail 3 -> " ++ Bool.pick(String, book_flailing(b3, True{}), "yes", "no"))
-    u19 : Unit <- IO.print("flail calm -> " ++ Bool.pick(String, book_flailing(Bk{0, m4, None{}, True{}, 2, 0}, False{}), "yes", "no"))
-    u23 : Unit <- IO.print("spent 2 -> " ++ Bool.pick(String, book_spent(Bk{0, m4, None{}, True{}, 2, 0}), "yes", "no"))
-    u24 : Unit <- IO.print("spent 1 -> " ++ Bool.pick(String, book_spent(Bk{0, m4, None{}, True{}, 1, 0}), "yes", "no"))
-    u25 : Unit <- IO.print("read out 2 -> " ++ Bool.pick(String, book_read_out(Bk{0, m4, None{}, True{}, 0, 2}), "yes", "no"))
-    u26 : Unit <- IO.print("read out 1 -> " ++ Bool.pick(String, book_read_out(Bk{0, m4, None{}, True{}, 0, 1}), "yes", "no"))
-    u27 : Unit <- IO.print("read out want -> " ++ Bool.pick(String, book_read_out(Bk{0, m4, Some{"a.c"}, True{}, 0, 5}), "yes", "no"))
-    u28 : Unit <- IO.print("served resets skips -> " ++ Bool.pick(String, book_read_out(book_served(Bk{0, m4, None{}, True{}, 0, 3}, "a.c", 1, False{})), "yes", "no"))
+    u19 : Unit <- IO.print("flail calm -> " ++ Bool.pick(String, book_flailing(Bk{0, m4, None{}, True{}, 2, 0, None{}}, False{}), "yes", "no"))
+    u23 : Unit <- IO.print("spent 2 -> " ++ Bool.pick(String, book_spent(Bk{0, m4, None{}, True{}, 2, 0, None{}}), "yes", "no"))
+    u24 : Unit <- IO.print("spent 1 -> " ++ Bool.pick(String, book_spent(Bk{0, m4, None{}, True{}, 1, 0, None{}}), "yes", "no"))
+    u25 : Unit <- IO.print("read out 2 -> " ++ Bool.pick(String, book_read_out(Bk{0, m4, None{}, True{}, 0, 2, None{}}), "yes", "no"))
+    u26 : Unit <- IO.print("read out 1 -> " ++ Bool.pick(String, book_read_out(Bk{0, m4, None{}, True{}, 0, 1, None{}}), "yes", "no"))
+    u27 : Unit <- IO.print("read out want -> " ++ Bool.pick(String, book_read_out(Bk{0, m4, Some{"a.c"}, True{}, 0, 5, None{}}), "yes", "no"))
+    u28 : Unit <- IO.print("served resets skips -> " ++ Bool.pick(String, book_read_out(book_served(Bk{0, m4, None{}, True{}, 0, 3, None{}}, "a.c", 1, False{})), "yes", "no"))
+    u29 : Unit <- IO.print("met after landing -> " ++ Bool.pick(String, book_met(book_served(book_want(book.new(), "a.c"), "a.c", 201, False{})), "yes", "no"))
+    u30 : Unit <- IO.print("met still wanted -> " ++ Bool.pick(String, book_met(book_want(book.new(), "a.c")), "yes", "no"))
+    u31 : Unit <- IO.print("met other path -> " ++ Bool.pick(String, book_met(book_served(book_want(book.new(), "a.c"), "b.c", 1, False{})), "yes", "no"))
+    u32 : Unit <- IO.print("met new want -> " ++ Bool.pick(String, book_met(book_want(book_served(book_want(book.new(), "a.c"), "a.c", 201, False{}), "b.c")), "yes", "no"))
+    u33 : Unit <- IO.print("met after exhaust -> " ++ Bool.pick(String, book_met(book_exhaust(book_want(book.new(), "a.c"), "a.c", 100)), "yes", "no"))
     +cov : String = "== suite coverage ==\nCOVERED: README.md\nCOVERED: tools_c.h\nAll checks passed.\n"
     u20 : Unit <- IO.print("covered -> " ++ show_cover(suite_cover(cov, "tools_c.h")))
     u21 : Unit <- IO.print("absent -> " ++ show_cover(suite_cover(cov, "LICENSE")))
@@ -393,6 +454,11 @@ def main() -> IO(Unit):
 #|read out 1 -> no
 #|read out want -> no
 #|served resets skips -> no
+#|met after landing -> yes
+#|met still wanted -> no
+#|met other path -> no
+#|met new want -> no
+#|met after exhaust -> yes
 #|covered -> covered
 #|absent -> absent
 #|prefix -> absent

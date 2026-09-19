@@ -43,9 +43,10 @@ type Report is Data:
 
 type Progress is Data:
   # The step's report to fold into the state before the next round, plus the
-  # loop's side-state — read cursors, the pending read a refused edit named,
-  # the search-miss run and the low-confidence run — travelling as a typed
-  # value rather than the C loop's globals.
+  # loop's side-state — read cursors, the pending read a refused edit named
+  # and the record that the named read landed, the search-miss run and the
+  # low-confidence run — travelling as a typed value rather than the C
+  # loop's globals.
   Running{rep: Report, book: R.Book}
   # Classify judged the task done; the loop stops here rather than on fuel.
   Finished{}
@@ -130,6 +131,17 @@ def route_note(+note: String, p: Progress) -> Progress:
   match p:
     case Running{+rep, +book}:
       Running{rep.note(rep, "\n[Selector rerouted]: " ++ note), book}
+    case other:
+      p
+
+# The served want's record where Classify reads it: the observation itself
+# says the refused edit's named file has been read, so the next decision can
+# re-propose the draft — the link the #41 run was missing when Jev wandered
+# back to searching after the read landed.
+def want_landed(p: Progress, +path: String) -> Progress:
+  match p:
+    case Running{+rep, +book}:
+      Running{rep.note(rep, "\n[Edit unblocked]: the refused edit named " ++ path ++ ", which has now been read — apply_edit may be re-drafted against it."), book}
     case other:
       p
 
@@ -441,12 +453,14 @@ def act_read_code.have(+state: P.State, +book: R.Book, +listing: String) -> IO(P
 # serves directly, and anything else is Jev's file Choice over the listing.
 def act_read_code(+state: P.State, +book: R.Book) -> IO(Progress):
   match book:
-    case R.Bk{misses, reads, want, ro, low, skips}:
+    case R.Bk{misses, reads, want, ro, low, skips, met}:
       match want ro:
         case _ False{}:
           act_read_code.first(state, book)
         case Some{+path} _:
-          serve_read_page(book, path, " (named by the refused edit)")
+          do IO<Progress>:
+            p : Progress <- serve_read_page(book, path, " (named by the refused edit)")
+            IO.pure(Progress, want_landed(p, path))
         case None{} _:
           act_read_code.have(state, book, P.state_listing(state))
 
@@ -998,6 +1012,8 @@ def answer_note(a: P.Answer) -> String:
 # force's window: the penultimate or final step, while no answer exists yet.
 # `spent` is the under-floor run the Book already carries, so the route knows
 # whether this reroute is the first or the one the floor can no longer buy.
+# `met` is its other record — the read a refused edit named has landed, so a
+# weak apply_edit is a resumption rather than a fresh guess.
 def run_answers(+answers: S.LoopAnswers, +state: P.State, +book: R.Book, last: Bool, spent: Bool) -> IO(Progress):
   match answers:
     case S.Ans{+action, +blocked, repeats, asked, risk, +progress}:
@@ -1008,7 +1024,7 @@ def run_answers(+answers: S.LoopAnswers, +state: P.State, +book: R.Book, last: B
           ", progress " ++ answer_note(progress) ++ ")"))
         u2 : Unit <- IO.print("")
         run_route(
-          S.route(answers, R.book_unread(book), R.book_stuck(book), spent, R.book_read_out(book), P.state_verify_failed(state)),
+          S.route(answers, R.book_unread(book), R.book_stuck(book), spent, R.book_read_out(book), P.state_verify_failed(state), R.book_met(book)),
           state, book,
           Bool.and(last, Bool.not(P.state_did(state, "generate_answer"))))
 
@@ -1066,11 +1082,14 @@ def agent_step(fuel: Nat, phase: Progress, +step_num: U32, +state: P.State) -> I
         +will_act : Bool = Bool.and(under, Bool.and(spent, S.floor_acts_answer(action)))
         # A retry-edit — apply_edit proposed while the last verify stands
         # failed — acts on the error already in the state rather than
-        # rerouting; it is an acted decision, not a reroute, so it does not
-        # bump the under-floor run either.
+        # rerouting; an apply_edit after the read a refused edit named has
+        # landed acts on the read the same way. Both are acted decisions,
+        # not reroutes, so neither bumps the under-floor run.
         +rerouted : Bool = Bool.and(under, Bool.and(
           Bool.not(will_act),
-          Bool.not(S.answer_retry_edit(action, P.state_verify_failed(state2)))))
+          Bool.not(Bool.or(
+            S.answer_retry_edit(action, P.state_verify_failed(state2)),
+            S.answer_met_edit(action, R.book_met(book))))))
         next : Progress <- step_decide(
           R.book_flailing(book, rerouted),
           S.Ans{action, blocked, repeats, asked, risk, progress},
