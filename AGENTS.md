@@ -70,6 +70,7 @@ Environment knobs:
 | `BENDCODER_GOAL` | (required) | The objective; `run_bendcoder.sh` maps its args here |
 | `BENDCODER_MAX_STEPS` | 6 | Step ceiling; each classify→act round is one step |
 | `BENDCODER_VERIFY_CMD` | `./run_tests.sh` | Suite an `apply_edit` must pass to be kept |
+| `BENDCODER_CHECK_CMD` | (unset) | Cheap per-file check run before the suite — `<file>` in the command names the changed path (else the path is appended). A failed check rolls the edit back with its error in the state; the suite never runs |
 | `BENDCODER_MODEL` | `openai/gpt-oss-120b:nitro` | OpenRouter model for every `GenerateText` call |
 
 The agent edits the working tree it runs in. Run it with a clean tree so its

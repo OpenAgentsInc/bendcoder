@@ -472,7 +472,10 @@ def act_generate_answer(+state: P.State, +book: R.Book) -> IO(Progress):
 # more rather than silently applying a part of it. The reply is parsed by
 # parse.bend into a typed Edit — Malformed, Refused or Block — so the match
 # in act_apply_edit below is exhaustive and a half-applied edit is
-# unrepresentable.
+# unrepresentable. Verification is two-tier (#43): BENDCODER_CHECK_CMD, when
+# set, runs a cheap per-file check first and a failure rolls the edit back
+# with its error in the state — the suite never runs — while
+# BENDCODER_VERIFY_CMD's suite still gates whether the edit is kept.
 
 # A rollback puts the file back the way it was, which for a file the edit
 # created is no file at all: WriteFile cannot express deletion, so the
@@ -532,6 +535,53 @@ def run_verify(+cmd: String, +path: String, +backup: String, existed: Bool, +boo
     r : Result<&1, &1, U32 & String, String> <- P.Exec(cmd)
     verify_outcome(r, path, backup, existed, book)
 
+# The suite is the second tier — BENDCODER_VERIFY_CMD, default ./run_tests.sh
+# — and it still decides whether the edit is kept. Split from applied.of so
+# the cheap check can hand a passing draft to it.
+def verify_suite(+path: String, +backup: String, existed: Bool, +book: R.Book) -> IO(Progress):
+  do IO<Progress>:
+    env : Result<&1, &1, U32 & String, String> <- IO.get_env("BENDCODER_VERIFY_CMD")
+    run_verify(Result.default(&1, &1, U32 & String, String, env, "./run_tests.sh"), path, backup, existed, book)
+
+# The cheap tier's verdict: a pass is only permission to pay for the suite,
+# and a fail is the edit refused already — rolled back with its compiler
+# error in the state through the same after_verify a failed suite takes, so
+# repair-in-place (#42) has one failure path to change.
+def check_outcome(r: Result<&1, &1, U32 & String, String>, +path: String, +backup: String, existed: Bool, +book: R.Book) -> IO(Progress):
+  match r:
+    case Done{v}:
+      verify_suite(path, backup, existed, book)
+    case Fail{e}:
+      (code, out) = e
+      after_verify(False{}, code, path, backup, out, existed, book)
+
+# The command BENDCODER_CHECK_CMD names is per-file: "<file>" in it marks the
+# changed path — `bend <file> -o /tmp/x.c` typechecks without running main —
+# and a command without it gets the path appended (`mycheck` runs as
+# `mycheck <path>`).
+def check_command(+cmd: String, +path: String) -> String:
+  Bool.pick(String,
+    String.contains(cmd, "<file>"),
+    E.before(cmd, "<file>") ++ path ++ E.after(cmd, "<file>"),
+    cmd ++ " " ++ path)
+
+def run_check(+cmd: String, +path: String, +backup: String, existed: Bool, +book: R.Book) -> IO(Progress):
+  do IO<Progress>:
+    +full : String = check_command(cmd, path)
+    u1 : Unit <- IO.print(U.color_magenta("   Checking: " ++ full ++ " ..."))
+    r : Result<&1, &1, U32 & String, String> <- P.Exec(full)
+    check_outcome(r, path, backup, existed, book)
+
+# Whether the cheap tier is configured arrives computed — a match cannot
+# inspect the env lookup — and a set-but-empty variable reads as unset, the
+# way gen_model reads BENDCODER_MODEL.
+def applied.check(has: Bool, +cmd: String, +path: String, +backup: String, existed: Bool, +book: R.Book) -> IO(Progress):
+  match has:
+    case True{}:
+      run_check(cmd, path, backup, existed, book)
+    case False{}:
+      verify_suite(path, backup, existed, book)
+
 def applied.of(r: E.ToolResult, +path: String, +backup: String, existed: Bool, +book: R.Book) -> IO(Progress):
   match r:
     case E.Err{+message}:
@@ -541,8 +591,9 @@ def applied.of(r: E.ToolResult, +path: String, +backup: String, existed: Bool, +
     case E.Ok{+output}:
       do IO<Progress>:
         u1 : Unit <- IO.print("   " ++ output)
-        env : Result<&1, &1, U32 & String, String> <- IO.get_env("BENDCODER_VERIFY_CMD")
-        run_verify(Result.default(&1, &1, U32 & String, String, env, "./run_tests.sh"), path, backup, existed, book)
+        env : Result<&1, &1, U32 & String, String> <- IO.get_env("BENDCODER_CHECK_CMD")
+        +cmd : String = String.trim(Result.default(&1, &1, U32 & String, String, env, ""))
+        applied.check(Bool.not(String.is_empty(cmd)), cmd, path, backup, existed, book)
 
 # EditFile reports failure as "error: ..." text over the string-only FFI;
 # E.tool_result reads that convention into a ToolResult, so the match above

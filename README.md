@@ -77,8 +77,11 @@ environment rather than copied. Both files are git-ignored.
 `run_bendcoder.sh` compiles `bendcoder_agent.bend` to `bendcoder_agent_bin` and runs it
 with `BENDCODER_GOAL` set from its arguments. `BENDCODER_MAX_STEPS` raises the
 6-step ceiling; `BENDCODER_VERIFY_CMD` points `apply_edit`'s verification at a
-different suite (default `./run_tests.sh`); `BENDCODER_MODEL` overrides the
-OpenRouter model every `Generate` call uses (default
+different suite (default `./run_tests.sh`); `BENDCODER_CHECK_CMD` adds a cheap
+per-file check ahead of it — `<file>` in the command names the changed path,
+as in `bend <file> -o /tmp/x.c` — and a failed check rolls the edit back with
+its error in the state without paying for the suite; `BENDCODER_MODEL`
+overrides the OpenRouter model every `Generate` call uses (default
 `openai/gpt-oss-120b:nitro`) — the knob for testing whether a stronger model
 moves what the loop can land. Run against a clean tree: kept edits land in
 the working directory, and a failed verify restores the file — or removes it
@@ -187,7 +190,10 @@ Classify -> anchor the edit -> Generate new text -> Edit applies it -> verify ->
   refuses rather than half-applies — so a multi-hunk change is a sequence of
   verified edits, not one reply. An empty `<<<OLD>>>` creates the file.
 - **Verify.** `./run_tests.sh` by default; set `BENDCODER_VERIFY_CMD` to point the
-  loop at a different suite. The suite ends by printing a `COVERED: <path>`
+  loop at a different suite. `BENDCODER_CHECK_CMD` sets a cheaper per-file gate
+  that runs first — `<file>` in the command names the changed path — and a
+  failed check rolls the edit back with its error in the state, the suite
+  never run (#43). The suite ends by printing a `COVERED: <path>`
   line for every file it exercises; a pass over a file absent from that list is
   reported as "verification passed, but nothing in the suite exercises it",
   not as a clean pass — a green run only says something about the files the
@@ -510,8 +516,9 @@ Its `apply_edit` runs the anchor path (file `Choice`, window `Choice`, line
 `Choice` plus the presence `Noul`, then exact bytes from the file) and falls
 back to drafting one `<<<PATH>>>`/`<<<OLD>>>`/`<<<NEW>>>` group per edit
 (a reply carrying more is refused rather than half-applied), verifies with
-`BENDCODER_VERIFY_CMD`, and restores the `ReadFile` snapshot with `WriteFile` —
-or removes the file outright when the edit is what created it.
+`BENDCODER_CHECK_CMD` when set and then `BENDCODER_VERIFY_CMD`, and restores
+the `ReadFile` snapshot with `WriteFile` — or removes the file outright when
+the edit is what created it.
 
 Bend has no `argv` — Base offers only `IO.get_env` — so the loop takes its
 goal from `BENDCODER_GOAL` and its step ceiling from `BENDCODER_MAX_STEPS`;
