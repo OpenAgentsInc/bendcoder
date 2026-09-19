@@ -372,6 +372,101 @@ precisely "give it the machinery a big-context agent has implicitly" — a
 repair loop, cheap checks, a visible stdlib, a plan object — bolted onto a
 loop that, unlike a general agent's, can prove things about itself.
 
+## Intersection with Coder
+
+Bendcoder is one member of a family.
+[`coder`](https://github.com/OpenAgentsInc/coder) is the closed-source
+product — one Rust workspace serving Coder Web, Desktop, Mobile and
+Terminal over a worker fleet and a model door — and the `openagents`
+monorepo rebuilds it in the open from the same two primitives:
+`crates/jev` (the public System One SDK), `crates/coder` (the agent),
+`crates/coder-terminal` (the surface). The shared bet is that **Classify
+decides, Generate writes, and code owns every effect.** Coder's own
+`docs/jev/two-primitives.md` proposes that split as an experiment whose
+arm B is "two calls, every effect a program step"; Bendcoder is arm B
+already running — self-editing, verified, and measured.
+
+### What the family has that Bendcoder wants
+
+- **The explore program's step shape** (`crates/coder-jev`). One Classify
+  request asks every question at once — including the argument Choices
+  for branches that do not win — where Bendcoder pays a separate call
+  per pick. And a refused action is evidence, not an ending: the step is
+  charged, the refusal joins the state, and only the same refusal twice
+  with nothing read between ends the run — a cleaner rule for the
+  problem Bendcoder's miss/skip counters also track.
+- **Recorded exchanges as fixtures** (`coder-jev` `replay`). Every
+  Classify call is record/replay, so tests exercise real decision
+  sequences with no key. Bendcoder's suite is offline but tests
+  mechanics only — recorded exchanges would let it replay live runs
+  deterministically.
+- **The repo map** (`crates/coder-map`, from the Pierrebhat prototype).
+  One embedding per file, cosine top-k, then a Jev Choice over the
+  neighbors carrying one-line descriptions — about 200 descriptions fit
+  a state file bodies cannot. That is the locate-path upgrade over
+  literal grep: a Choice over descriptions ranges over far more of a
+  checkout than `index.paths` plus the sniff.
+- **The info pack** (`coder.info-pack.v1`). A bounded, cited selection
+  of what the loop read, handed to generation once. Bendcoder's bounded
+  `observations` is the same idea; the cited-span ranking is the
+  refinement that keeps the payload floor low.
+- **Gate-with-repair delivery** (Coder's run loop). A run that stops
+  with changes gets the gate's failure returned to it, up to two repair
+  attempts, then a final gate — and a failure delivers nothing. That is
+  issue #42's repair primitive with the termination bound already
+  designed.
+- **The command-plan loop** (openagents `crates/coder`). Generate
+  replies with a JSON plan of `sh -c` commands plus a `why` each; a
+  deny list refuses the machine-enders before they spawn; a second
+  Classify call judges the round (`pass`/`retry`/`stop`, `useful`,
+  `damage`). A freer alternative to the fixed action space — generality
+  behind a judgment rather than behind a roster.
+- **Trajectory metrics** (ATIF). `waste` groups calls by normalized
+  intent and `calls_before_first_change` counts orientation — the
+  numbers that would measure Bendcoder's re-orientation cost between
+  hunks (#45) directly.
+
+### What Bendcoder contributes back
+
+- **A running arm B.** The proposed architecture exists and its envelope
+  is measured: single-file C edits and focused changes land
+  autonomously; novel-module authoring and wide threading are the mapped
+  boundaries — direct evidence on the experiment's "what would sink it"
+  list (the option cap, the state budget, floors, a step with no
+  program).
+- **The anchored edit.** File Choice → window → line id → exact bytes —
+  a fabricated `old_string` is impossible rather than refused, the
+  strongest form of "select rather than generate" in the family.
+- **A verify gate that cannot self-certify.** SUITEPASS plus the
+  coverage complement: a corrupted or truncated suite exits nonzero.
+  Found by a delegated run that gutted its own gate.
+- **The Book.** Typed loop memory as data — read cursors, the pending
+  read a refused edit names, the miss/skip/under-floor runs — the
+  explicit side-state a bounded-state selector needs.
+- **Floors tuned on live delegations.** The 0.45/0.65 thresholds measured
+  on labeled runs, plus the spent-floor and retry-edit rules — the
+  calibration evidence the family's eval-first rule asks for.
+- **A failure corpus.** Every delegation failure documented with its
+  fix in `docs/self-delegation.md` — labeled cases for floor-tuning, and
+  the reason the gate now guards itself.
+
+### Suggested next steps
+
+- **For the openagents rebuild:** `crates/coder` today chats and runs
+  shell plans — its rebuild plan names `read_file`, `search`,
+  `run_build` and `apply_edit` as the next tools. Bendcoder's
+  `tools_c.h` semantics are the portable reference: exact-match refusal
+  with match counts, the `N\t` strip and dedent fallbacks, grep context
+  and miss hints, verify-then-keep-or-restore.
+- **For Bendcoder:** the explore program's step shape answers two live
+  issues — speculative fan-out folds the per-pick Classify calls into
+  one request (cheaper steps), and refusal-as-evidence is a simpler
+  read-out rule than the skips counter. The trajectory metrics would
+  measure #45's re-orientation cost rather than estimate it.
+- **For both:** Bendcoder's delegation corpus is labeled data for the
+  family's floor-tuning; Coder's recorded-exchange fixtures are the
+  replay mechanism Bendcoder's suite lacks.
+
 ## The agent
 
 `bendcoder_agent.bend` is the agent `run_bendcoder.sh` builds and runs — the whole
