@@ -340,13 +340,16 @@ def act_read_code.found(+book: R.Book, +path: String) -> IO(Progress):
 
 # The pick's answer: a confident non-`none` label serves its page; everything
 # else — `none`, low confidence, a missing or mistyped answer — reports the
-# read that did not happen rather than guessing a file.
+# read that did not happen rather than guessing a file. A decline is a
+# verdict on the whole option list, so the Book counts it: the route sends a
+# read decision to a search once the picker has said no enough, and the
+# report tells the next decision not to ask for a read again.
 def act_read_code.pick(+book: R.Book, m: Maybe<&2, String>) -> IO(Progress):
   match m:
     case None{}:
       report("Read skipped",
-        "The file Choice returned nothing usable — the request may have failed, or no repository file is worth reading for this goal right now.",
-        R.book_acted(book))
+        "The file Choice declined: no remaining repository file is judged worth reading for this goal. Do not propose read_code again — search for a term instead, or act on what is already read.",
+        R.book_declined(book))
     case Some{+path}:
       act_read_code.found(book, path)
 
@@ -383,7 +386,7 @@ def act_read_code.have(+state: P.State, +book: R.Book, +listing: String) -> IO(P
 # serves directly, and anything else is Jev's file Choice over the listing.
 def act_read_code(+state: P.State, +book: R.Book) -> IO(Progress):
   match book:
-    case R.Bk{misses, reads, want, ro, low}:
+    case R.Bk{misses, reads, want, ro, low, skips}:
       match want ro:
         case _ False{}:
           act_read_code.first(state, book)
@@ -771,15 +774,28 @@ def dispatch_action(a: A.Action, +state: P.State, +book: R.Book) -> IO(Progress)
       IO.pure(Progress, Finished{})
 
 # A route that is not Act lands here: the chosen action is not run and the
-# loop re-reads instead, which is the safe fallback every non-acting row
-# shares. Confirm carries the same landing — the Bend loop has no one to ask
-# mid-run, so an unconfirmed risky action is not run either. The reason goes
-# into the report, the way the C loop appends "Selector rerouted".
+# loop gathers information instead — a re-read when the picker is still
+# live, a search once it has declined enough that another read is the same
+# dead end again. Confirm carries the same landing — the Bend loop has no
+# one to ask mid-run, so an unconfirmed risky action is not run either. The
+# reason goes into the report, the way the C loop appends
+# "Selector rerouted". `out` arrives computed because a match scrutinizes
+# only parameters.
+def reroute.go(+reason: String, +state: P.State, +book: R.Book, out: Bool) -> IO(Progress):
+  match out:
+    case True{}:
+      do IO<Progress>:
+        u1 : Unit <- IO.print(U.color_yellow("   [selector] " ++ reason ++ "; searching instead."))
+        p : Progress <- act_search_code(state, book)
+        IO.pure(Progress, acted("search_code", route_note(reason, p)))
+    case False{}:
+      do IO<Progress>:
+        u1 : Unit <- IO.print(U.color_yellow("   [selector] " ++ reason ++ "; re-reading instead."))
+        p : Progress <- act_read_code(state, book)
+        IO.pure(Progress, acted("read_code", route_note(reason, p)))
+
 def reroute(+reason: String, +state: P.State, +book: R.Book) -> IO(Progress):
-  do IO<Progress>:
-    u1 : Unit <- IO.print(U.color_yellow("   [selector] " ++ reason ++ "; re-reading instead."))
-    p : Progress <- act_read_code(state, book)
-    IO.pure(Progress, acted("read_code", route_note(reason, p)))
+  reroute.go(reason, state, book, R.book_read_out(book))
 
 # Fuel policy rather than an answer route, so it stays beside the loop: on
 # the penultimate or final step with no answer yet, the routed action is
@@ -861,7 +877,7 @@ def run_answers(+answers: S.LoopAnswers, +state: P.State, +book: R.Book, last: B
           ", progress " ++ answer_note(progress) ++ ")"))
         u2 : Unit <- IO.print("")
         run_route(
-          S.route(answers, R.book_unread(book), R.book_stuck(book), spent),
+          S.route(answers, R.book_unread(book), R.book_stuck(book), spent, R.book_read_out(book)),
           state, book,
           Bool.and(last, Bool.not(P.state_did(state, "generate_answer"))))
 
