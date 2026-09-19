@@ -211,6 +211,7 @@ type State is Data:
     changed_paths: List<&2, String>, # files an applied edit left changed
     verification: Verif,             # the last verification's outcome
     index_paths: List<&2, String>,   # the repository listing, injected
+    base_api: List<&2, String>,      # the Base signature digest, injected
     search_hits: List<&2, String>,   # the searches already run, injected
     steps_left: U32,                 # fuel the loop has left
     tokens: Nat                      # cumulative OpenRouter spend, total_tokens
@@ -303,10 +304,11 @@ def verif_str(v: Verif) -> String:
 # The whole record rendered to the request's `state` object — the shape the
 # selector design gives it, so each question's backticked path names a real
 # field. `index.paths` is capped at the Choice option cap: a listing longer
-# than that could not be offered as options anyway.
+# than that could not be offered as options anyway. `index.base_api` is the
+# stdlib signature digest, injected beside it (#44).
 def state_to_json(s: State) -> String:
   match s:
-    case St{+directive, +step, +done, +obs, +changed, verification, +paths, +hits, +left, +tokens}:
+    case St{+directive, +step, +done, +obs, +changed, verification, +paths, +base, +hits, +left, +tokens}:
       "{\"directive\":" ++ json_str(directive)
         ++ ",\"program\":{\"step\":" ++ json_str(step)
         ++ ",\"steps_done\":" ++ json_str_list(done) ++ "}"
@@ -314,23 +316,30 @@ def state_to_json(s: State) -> String:
         ++ ",\"facts\":{\"changed_paths\":" ++ json_str_list(changed)
         ++ ",\"verification\":" ++ json_str(verif_str(verification)) ++ "}"
         ++ ",\"index\":{\"paths\":" ++ json_str_list(List.take(&2, String, paths, 255n))
+        ++ ",\"base_api\":" ++ json_str_list(base)
         ++ ",\"search_hits\":" ++ json_str_list(bound(hits)) ++ "}"
         ++ ",\"budget\":{\"steps_left\":" ++ U32.show(left)
         ++ ",\"tokens_used\":" ++ Nat.show(tokens) ++ "}}"
 
 # The text form the generative model still gets — Classify reads the object,
 # but Generate's prompts want prose, which is the directive plus the
-# observations exactly as the old string state concatenated them.
+# observations exactly as the old string state concatenated them. The base-API
+# digest rides along as a `[Base API]` section: Generate's prompts are the
+# drafts that invented stdlib names, so the signatures have to reach this
+# rendering, not only the Classify object's (#44).
 def state_text(s: State) -> String:
   match s:
-    case St{+directive, step, done, +obs, changed, verification, paths, hits, left, tokens}:
-      directive ++ String.concat(obs)
+    case St{+directive, step, done, +obs, changed, verification, paths, +base, hits, left, tokens}:
+      directive
+        ++ Bool.pick(String, List.is_empty(&2, String, base),
+          "", "\n[Base API]:\n" ++ String.join(base, "\n"))
+        ++ String.concat(obs)
 
 # The injected repository listing in the shape the anchor's file Choice
 # already consumes — one path per line.
 def state_listing(s: State) -> String:
   match s:
-    case St{directive, step, done, obs, changed, verification, +paths, hits, left, tokens}:
+    case St{directive, step, done, obs, changed, verification, +paths, base, hits, left, tokens}:
       String.join(paths, "\n")
 
 # Whether the last recorded verification failed — the signal that a proposed
@@ -345,7 +354,7 @@ def state_verify_failed.go(+v: Verif) -> Bool:
 
 def state_verify_failed(s: State) -> Bool:
   match s:
-    case St{directive, step, done, obs, changed, +verification, paths, hits, left, tokens}:
+    case St{directive, step, done, obs, changed, +verification, paths, base, hits, left, tokens}:
       state_verify_failed.go(verification)
 
 # Whether the program already ran the named action — the final_answer flag
@@ -353,13 +362,14 @@ def state_verify_failed(s: State) -> Bool:
 # tests before overriding the route.
 def state_did(s: State, +name: String) -> Bool:
   match s:
-    case St{directive, +step, +done, obs, changed, verification, paths, hits, left, tokens}:
+    case St{directive, +step, +done, obs, changed, verification, paths, base, hits, left, tokens}:
       Bool.or(String.eq(step, name), List.contains(~String, ~String.eq, done, name))
 
 # The state a run starts with: the goal as directive, the injected listing as
-# index.paths, and everything else at its empty or "unknown" initial value.
-def state.new(+directive: String, +paths: List<&2, String>, +left: U32) -> State:
-  St{directive, "", Nil{}, Nil{}, Nil{}, VUnknown{}, paths, Nil{}, left, 0n}
+# index.paths, the injected signature digest as index.base_api, and everything
+# else at its empty or "unknown" initial value.
+def state.new(+directive: String, +paths: List<&2, String>, +base: List<&2, String>, +left: U32) -> State:
+  St{directive, "", Nil{}, Nil{}, Nil{}, VUnknown{}, paths, base, Nil{}, left, 0n}
 
 # Build complete TypeSafe System One request JSON
 def build_classify_payload(state: State, qs: List<&2, Question>) -> String:
@@ -511,6 +521,7 @@ def demo_state() -> State:
     ["hello.bend"],
     VPass{},
     ["agent_primitives.bend", "hello.bend"],
+    ["def String.to_lower(s: String) -> String:"],
     ["greet:\nhello.bend:4:greet"],
     5,
     700n
@@ -521,5 +532,5 @@ def main() -> IO(Unit):
     u1 : Unit <- IO.print(state_to_json(demo_state()))
     IO.print(json_str_list(bound.with(["aaa", "bbb", "ccc"], 4n)))
 
-#|{"directive":"add a greet function","program":{"step":"search_code","steps_done":["read_code"]},"observations":["[Search for 'greet']:\nhello.bend:4:greet"],"facts":{"changed_paths":["hello.bend"],"verification":"passed"},"index":{"paths":["agent_primitives.bend","hello.bend"],"search_hits":["greet:\nhello.bend:4:greet"]},"budget":{"steps_left":5,"tokens_used":700}}
+#|{"directive":"add a greet function","program":{"step":"search_code","steps_done":["read_code"]},"observations":["[Search for 'greet']:\nhello.bend:4:greet"],"facts":{"changed_paths":["hello.bend"],"verification":"passed"},"index":{"paths":["agent_primitives.bend","hello.bend"],"base_api":["def String.to_lower(s: String) -> String:"],"search_hits":["greet:\nhello.bend:4:greet"]},"budget":{"steps_left":5,"tokens_used":700}}
 #|["...2 earlier entr(ies) dropped to fit the state budget ...","ccc"]

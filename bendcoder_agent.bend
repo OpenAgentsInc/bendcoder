@@ -6,6 +6,7 @@ import ./ui.bend as U
 import ./selector.bend as S
 import ./reads.bend as R
 import ./terms.bend as T
+import ./base_api.bend as B
 
 # ==============================================================================
 # Bendcoder: Autonomous Coding Agent Loop
@@ -170,7 +171,7 @@ def verif_or(+cur: P.Verif, m: Maybe<&2, P.Verif>) -> P.Verif:
 # The state transition itself: one report folded in, newest entries last.
 def apply_report(s: P.State, r: Report, +left: U32) -> P.State:
   match s r:
-    case P.St{directive, +step, done, obs, changed, verif, paths, hits, _, +toks}
+    case P.St{directive, +step, done, obs, changed, verif, paths, base, hits, _, +toks}
          Rep{nobs, +nact, nver, nchanged, nhits, ntok}:
       P.St{
         directive,
@@ -180,6 +181,7 @@ def apply_report(s: P.State, r: Report, +left: U32) -> P.State:
         List.append(&2, String, changed, nchanged),
         verif_or(verif, nver),
         paths,
+        base,
         List.append(&2, String, hits, nhits),
         left,
         Nat.add(toks, ntok)}
@@ -1041,8 +1043,76 @@ def paths_of(r: Result<&1, &1, U32 & String, String>) -> List<&2, String>:
     case Fail{e}:
       {Nil{} : List<&2, String>}
 
+# A leading "~/" on BENDCODER_BASE expands through HOME — env paths are
+# commonly written that way and nothing downstream expands them.
+def base_expand(+path: String, +home: String) -> String:
+  Bool.pick(String, String.starts_with(path, "~/"),
+    home ++ String.drop(path, 1n), path)
+
+# The base-API digest's source, first non-empty read wins: BENDCODER_BASE when
+# it names a readable file, else the bend install's own `bend base` — which
+# prints base.bend wherever the install puts it — else the usual checkouts
+# under $HOME. A run with no reachable base injects an empty digest and the
+# loop runs exactly as before; the retrieval is injected rather than asked
+# for, so its absence degrades rather than fails.
+def base_source.paths.go(+src: String, +home: String, empty: Bool) -> IO(String):
+  match empty:
+    case False{}:
+      IO.pure(String, src)
+    case True{}:
+      P.ReadFile(home ++ "/work/bend/bend2/base.bend")
+
+def base_source.paths(+home: String) -> IO(String):
+  do IO<String>:
+    +src : String <- P.ReadFile(home ++ "/bend/bend2/base.bend")
+    base_source.paths.go(src, home, String.is_empty(src))
+
+def base_source.exec.go(+src: String, +home: String, empty: Bool) -> IO(String):
+  match empty:
+    case False{}:
+      IO.pure(String, src)
+    case True{}:
+      base_source.paths(home)
+
+def base_source.exec(+home: String) -> IO(String):
+  do IO<String>:
+    r : Result<&1, &1, U32 & String, String> <- P.Exec("bend base 2>/dev/null")
+    +src : String = Result.default(&1, &1, U32 & String, String, r, "")
+    base_source.exec.go(src, home, String.is_empty(src))
+
+def base_source.env.go(+src: String, +home: String, empty: Bool) -> IO(String):
+  match empty:
+    case False{}:
+      IO.pure(String, src)
+    case True{}:
+      base_source.exec(home)
+
+def base_source.env(+path: String, +home: String) -> IO(String):
+  do IO<String>:
+    +src : String <- P.ReadFile(base_expand(path, home))
+    base_source.env.go(src, home, String.is_empty(src))
+
+def base_source.have(+path: String, +home: String, set: Bool) -> IO(String):
+  match set:
+    case True{}:
+      base_source.env(path, home)
+    case False{}:
+      base_source.exec(home)
+
+def base_source() -> IO(String):
+  do IO<String>:
+    env : Result<&1, &1, U32 & String, String> <- IO.get_env("BENDCODER_BASE")
+    +path : String = Result.default(&1, &1, U32 & String, String, env, "")
+    home_r : Result<&1, &1, U32 & String, String> <- IO.get_env("HOME")
+    +home : String = Result.default(&1, &1, U32 & String, String, home_r, "")
+    base_source.have(path, home, Bool.not(String.is_empty(path)))
+
 # The goal is both announced and seeded into the state as `directive`, so it
-# arrives reusable.
+# arrives reusable. The base-API digest is the same move as `index.paths`:
+# retrieval the model must ask for is not called, so the stdlib's signature
+# surface travels in `index.base_api` from the first Classify on — and in the
+# `[Base API]` section of the Generate prompts, which is where the invented
+# names came from (#44).
 def run_agent(+fuel: Nat, +goal: String) -> IO(Unit):
   do IO<Unit>:
     u1 : Unit <- U.render_banner()
@@ -1058,7 +1128,14 @@ def run_agent(+fuel: Nat, +goal: String) -> IO(Unit):
     u5 : Unit <- IO.print(Bool.pick(String, List.is_empty(&2, String, sniffed),
       "",
       U.color_magenta("[SNIFF] ") ++ String.join(sniffed, ", ")))
-    s1 : P.State <- sniff_run(sniffed, P.state.new(goal, paths, U32.from_nat(fuel)), U32.from_nat(fuel))
+    +src : String <- base_source()
+    +api : List<&2, String> = B.digest(src)
+    u6 : Unit <- IO.print(Bool.pick(String, List.is_empty(&2, String, api),
+      "",
+      U.color_magenta("[INDEX] ") ++
+      Nat.show(List.length(&2, String, api)) ++
+      " base-API signatures injected into the state."))
+    s1 : P.State <- sniff_run(sniffed, P.state.new(goal, paths, api, U32.from_nat(fuel)), U32.from_nat(fuel))
     agent_step(fuel, Running{rep.empty(), R.book.new()}, 1, s1)
 
 # BENDCODER_MAX_STEPS raises the ceiling for a longer run — a non-positive or
