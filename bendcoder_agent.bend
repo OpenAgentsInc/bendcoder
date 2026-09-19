@@ -58,7 +58,7 @@ type Progress is Data:
   Stalled{reason: String}
 
 # The question set lives in selector.bend beside the thresholds and the route
-# table that consume them (design rule 8); agent_step asks S.questions().
+# table that consume them (design rule 8); agent_step asks S.questions(Bool.not(List.is_empty(&2, W.Item, P.state_plan(state)))).
 
 # ------------------------------------------------------------------------------
 # Reports: what the handlers build, and how one folds into the state
@@ -922,6 +922,27 @@ def anchor_apply_edit(+state: P.State, +book: R.Book) -> IO(Progress):
 
 # The action arrives already routed: `none` and unparseable decisions are Stop
 # rows in the selector's table upstream, so this match is over Action itself.
+# plan: ask for the worklist the rest of the run works through. The reply is
+# one item per line, parsed by plan.bend into Items that check themselves off
+# as their files appear in facts.changed_paths -- which is why the items are
+# asked to name a file. rep.planned carries the list out so the next round's
+# state renders it, and route.gate reroutes a premature task_complete while
+# any item is still open.
+def act_plan(+state: P.State, +book: R.Book) -> IO(Progress):
+  do IO<Progress>:
+    u1 : Unit <- IO.print(U.color_magenta("[TOOL PLAN] Drafting the worklist ..."))
+    m : String <- gen_model()
+    +raw : String <- P.Generate(
+      m,
+      "You are Bendcoder, an autonomous coding agent written in Bend2. Your repository's sources are Bend2 (.bend) and C (.c/.h) only. Reply with a worklist and nothing else: one step per line, each naming the repository file it lands in. No prose, no numbering, no commentary.",
+      "State:\n" ++ P.state_text(state) ++ "\nTask: List the steps that would satisfy the goal, in order, each naming the file it changes."
+    )
+    +gen : String <- P.extract.generation(raw)
+    toks : Nat <- P.GenerateUsage(raw)
+    items : List<&2, W.Item> = W.parse(gen)
+    p : Progress <- remember(rep.planned("Plan", gen, items), "Plan", gen, R.book_acted(book))
+    IO.pure(Progress, tokenized(p, toks))
+
 def dispatch_action(a: A.Action, +state: P.State, +book: R.Book) -> IO(Progress):
   match a:
     case A.ReadCode{}:
@@ -934,6 +955,8 @@ def dispatch_action(a: A.Action, +state: P.State, +book: R.Book) -> IO(Progress)
       anchor_apply_edit(state, book)
     case A.GenerateAnswer{}:
       act_generate_answer(state, book)
+    case A.Plan{}:
+      act_plan(state, book)
     case A.TaskComplete{}:
       IO.pure(Progress, Finished{})
 
@@ -1043,7 +1066,8 @@ def run_answers(+answers: S.LoopAnswers, +state: P.State, +book: R.Book, last: B
           ", progress " ++ answer_note(progress) ++ ")"))
         u2 : Unit <- IO.print("")
         run_route(
-          S.route(answers, R.book_unread(book), R.book_stuck(book), spent, R.book_read_out(book), P.state_verify_failed(state), R.book_met(book)),
+          S.route(answers, R.book_unread(book), R.book_stuck(book), spent, R.book_read_out(book), P.state_verify_failed(state), R.book_met(book),
+                  W.next_open(P.state_plan(state), P.state_paths(state))),
           state, book,
           Bool.and(last, Bool.not(P.state_did(state, "generate_answer"))))
 
@@ -1084,7 +1108,7 @@ def agent_step(fuel: Nat, phase: Progress, +step_num: U32, +state: P.State) -> I
         u3 : Unit <- IO.print(U.color_cyan(U.rule()))
         +rest : Nat = p
         +state2 : P.State = apply_report(state, rep, U32.from_nat(Nat.add(1n, rest)))
-        +c_raw : String <- P.Classify(state2, S.questions(R.book_read_out(book)))
+        +c_raw : String <- P.Classify(state2, S.questions(R.book_read_out(book), Bool.not(List.is_empty(&2, W.Item, P.state_plan(state)))))
         +action : P.Answer <- P.ParseAnswer(c_raw, "action")
         blocked : P.Answer <- P.ParseAnswer(c_raw, "is_blocked")
         repeats : P.Answer <- P.ParseAnswer(c_raw, "repeats")
