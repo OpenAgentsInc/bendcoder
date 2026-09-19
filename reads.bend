@@ -22,8 +22,9 @@ type ReadMark is Data:
 # a refused blind edit named for the next read (#35's mechanism). `read_once`
 # is whether any read_code has run, which is what the route's "only drafted
 # against code already read" guard tests — bendcoder_agent.c's read_phase != 0.
-# `low` counts consecutive decisions under the general confidence floor —
-# bendcoder_agent.c's low_confidence_run.
+# `low` counts consecutive under-floor decisions that rerouted — the run the
+# floor's spent check and the flail halt both read. bendcoder_agent.c's
+# low_confidence_run.
 type Book is Data:
   Bk{
     misses: U32,
@@ -62,8 +63,9 @@ def book_marks(+b: Book) -> List<&2, ReadMark>:
     case Bk{misses, +reads, want, ro, low}:
       reads
 
-# The flail counter: a decision under the general confidence floor bumps it,
-# a confident one clears it — low_confidence_run in bendcoder_agent.c.
+# The flail counter: a decision under its consequence-weighted floor that
+# rerouted bumps it; a confident decision — or one the spent floor let act —
+# clears it. low_confidence_run in bendcoder_agent.c.
 def book_tally(+b: Book, under: Bool) -> Book:
   match b under:
     case Bk{+misses, +reads, +want, +ro, +l} True{}:
@@ -83,6 +85,20 @@ def book_flailing(+b: Book, under: Bool) -> Bool:
       U32.is_ge(U32.inc(l), low_limit())
     case _ _:
       False{}
+
+# The under-floor reroutes the floor buys before it is spent. Two reads is
+# what a cautious loop needs around a decision it distrusts; a third reroute
+# reads into files that stopped being able to help, so the guarded path takes
+# the decision instead. Read by the caller before this step's tally.
+def floor_reads() -> U32: 2
+
+# Whether the floor already bought its reads — `low` at this decision, not
+# including it, so the second consecutive reroute spends the floor and the
+# third under-floor decision acts.
+def book_spent(+b: Book) -> Bool:
+  match b:
+    case Bk{misses, reads, want, ro, +l}:
+      U32.is_ge(l, floor_reads())
 
 # "the head of xs is a mark for path" — the computed scrutinee the walks
 # below receive as a parameter, because a match cannot inspect the call.
@@ -306,6 +322,8 @@ def main() -> IO(Unit):
     +b3 : Book = book_tally(Bk{0, m4, None{}, True{}, 2}, True{})
     u18 : Unit <- IO.print("flail 3 -> " ++ Bool.pick(String, book_flailing(b3, True{}), "yes", "no"))
     u19 : Unit <- IO.print("flail calm -> " ++ Bool.pick(String, book_flailing(Bk{0, m4, None{}, True{}, 2}, False{}), "yes", "no"))
+    u23 : Unit <- IO.print("spent 2 -> " ++ Bool.pick(String, book_spent(Bk{0, m4, None{}, True{}, 2}), "yes", "no"))
+    u24 : Unit <- IO.print("spent 1 -> " ++ Bool.pick(String, book_spent(Bk{0, m4, None{}, True{}, 1}), "yes", "no"))
     +cov : String = "== suite coverage ==\nCOVERED: README.md\nCOVERED: tools_c.h\nAll checks passed.\n"
     u20 : Unit <- IO.print("covered -> " ++ show_cover(suite_cover(cov, "tools_c.h")))
     u21 : Unit <- IO.print("absent -> " ++ show_cover(suite_cover(cov, "LICENSE")))
@@ -331,6 +349,8 @@ def main() -> IO(Unit):
 #|served -> a.c:201 | unread no
 #|flail 3 -> yes
 #|flail calm -> no
+#|spent 2 -> yes
+#|spent 1 -> no
 #|covered -> covered
 #|absent -> absent
 #|prefix -> absent

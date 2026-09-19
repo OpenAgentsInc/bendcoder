@@ -849,7 +849,9 @@ def answer_note(a: P.Answer) -> String:
 # are the loop's own facts — nothing read yet, searches missing in a row —
 # which the guard rows test but Classify cannot see. `last` is the fuel
 # force's window: the penultimate or final step, while no answer exists yet.
-def run_answers(+answers: S.LoopAnswers, +state: P.State, +book: R.Book, last: Bool) -> IO(Progress):
+# `spent` is the under-floor run the Book already carries, so the route knows
+# whether this reroute is the first or the one the floor can no longer buy.
+def run_answers(+answers: S.LoopAnswers, +state: P.State, +book: R.Book, last: Bool, spent: Bool) -> IO(Progress):
   match answers:
     case S.Ans{+action, +blocked, repeats, asked, risk, +progress}:
       do IO<Progress>:
@@ -859,7 +861,7 @@ def run_answers(+answers: S.LoopAnswers, +state: P.State, +book: R.Book, last: B
           ", progress " ++ answer_note(progress) ++ ")"))
         u2 : Unit <- IO.print("")
         run_route(
-          S.route(answers, R.book_unread(book), R.book_stuck(book)),
+          S.route(answers, R.book_unread(book), R.book_stuck(book), spent),
           state, book,
           Bool.and(last, Bool.not(P.state_did(state, "generate_answer"))))
 
@@ -868,13 +870,13 @@ def run_answers(+answers: S.LoopAnswers, +state: P.State, +book: R.Book, last: B
 # halt in bendcoder_agent.c, checked after this step's decision is tallied into
 # the Book that run_answers and the recursion see. Returns a Progress so the
 # recursion below stays the only caller of itself.
-def step_decide(flailing: Bool, +answers: S.LoopAnswers, +state: P.State, +book: R.Book, last: Bool) -> IO(Progress):
+def step_decide(flailing: Bool, +answers: S.LoopAnswers, +state: P.State, +book: R.Book, last: Bool, spent: Bool) -> IO(Progress):
   match flailing:
     case True{}:
       IO.pure(Progress, Stalled{
         U32.show(R.low_limit()) ++ " consecutive decisions under the confidence floor; stopping rather than flailing."})
     case False{}:
-      run_answers(answers, state, book, last)
+      run_answers(answers, state, book, last, spent)
 
 # One round: fold the last tool output into the state, classify it, run the
 # chosen action, and recurse on the remaining fuel.
@@ -907,11 +909,19 @@ def agent_step(fuel: Nat, phase: Progress, +step_num: U32, +state: P.State) -> I
         asked : P.Answer <- P.ParseAnswer(c_raw, "needs_code_change")
         risk : P.Answer <- P.ParseAnswer(c_raw, "risk")
         progress : P.Answer <- P.ParseAnswer(c_raw, "progress_score")
-        +under : Bool = S.low_conf(action)
+        # `under` is the consequence-weighted floor the route tests — an
+        # apply_edit in the band counts as the reroute it produces. `spent`
+        # reads the run before this step's tally: the floor bought its reads,
+        # so an under-floor decision that can act does — and an acted decision
+        # is not a reroute, so it does not bump the run either.
+        +under : Bool = S.answer_under(action)
+        +spent : Bool = R.book_spent(book)
+        +will_act : Bool = Bool.and(under, Bool.and(spent, S.floor_acts_answer(action)))
+        +rerouted : Bool = Bool.and(under, Bool.not(will_act))
         next : Progress <- step_decide(
-          R.book_flailing(book, under),
+          R.book_flailing(book, rerouted),
           S.Ans{action, blocked, repeats, asked, risk, progress},
-          state2, R.book_tally(book, under), Nat.is_le(rest, 1n))
+          state2, R.book_tally(book, rerouted), Nat.is_le(rest, 1n), spent)
         agent_step(rest, next, (step_num + 1 : U32), state2)
 
 # The repository listing is filtered to non-empty lines — a trailing newline
