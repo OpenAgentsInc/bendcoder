@@ -29,13 +29,13 @@ echo "Delegating issue #$ISSUE to Bender: $TITLE"
 echo "Step budget: $STEPS"
 echo
 
-gcc -std=c11 -O1 -Wall -Wextra bender_agent.c -o bender_agent_bin
+bend bender_agent.bend -o bender_loop.c
+gcc -std=c11 -O1 -I. bender_loop.c -lpthread -lm -o bender_agent_bin
 
 LOG="/tmp/bender_delegate_$ISSUE.log"
-BENDER_MAX_STEPS="$STEPS" ./bender_agent_bin \
-  "$TITLE
+BENDER_MAX_STEPS="$STEPS" BENDER_GOAL="$TITLE
 
-$BODY" 2>&1 | tee "$LOG"
+$BODY" ./bender_agent_bin 2>&1 | tee "$LOG"
 
 echo
 echo "================================================================"

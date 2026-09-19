@@ -6,7 +6,7 @@ import Base
 # The agent's actions as a datatype rather than a string compared with
 # String.eq in a chain. A match over Action is exhaustive: adding a seventh
 # action and forgetting to handle it is a compile error, not a fallthrough.
-# The C runtime mirrors this with enum Action in bender_agent.c.
+# This was enum Action's twin while the loop lived in bender_agent.c.
 # ==============================================================================
 
 type Action is Data:

@@ -1,7 +1,7 @@
 // Subprocess execution and file I/O primitives for Bend2.
 //
-// The Read / Write / Edit algorithms live in tools_c.h, shared with
-// bender_agent.c; this file is only the Bend FFI wrapping around them.
+// The Read / Write / Edit algorithms live in tools_c.h; this file is only
+// the Bend FFI wrapping around them.
 //
 // The boundary is string-only, matching the other laws in the project: numeric
 // arguments (a read's limit, an edit's replace_all flag) arrive as decimal or
@@ -314,3 +314,56 @@ static void __attribute__((constructor)) sys_grep_file_use(void) {
   io_eff(CID_SYS_GREP_FILE, sys_grep_file_run, 0);
 }
 #endif  // CID_SYS_GREP_FILE
+
+#ifdef CID_SYS_EXISTS
+// -----------------------------------------------------------------------------
+// 7. sys.file_exists: whether a path exists on disk
+// sys.exists(path: String) -> IO(String)
+// "true" or "false" over the string-only boundary — the loop's blind-edit
+// guard asks it before refusing an edit to a file never read, the way
+// bender_agent.c asks bender_exists.
+// -----------------------------------------------------------------------------
+static void sys_exists_worker(IoWork* w) {
+  char* path = w->data;
+  int ok = bender_exists(path);
+  free(path);
+  w->data = strdup(ok ? "true" : "false");
+  w->size = strlen(w->data);
+}
+
+Term sys_exists_run(Env e, Term* f, IoWork* w) {
+  w->data = io_cstr(e, f[0], &w->size);
+  return io_work(w, sys_exists_worker, sys_tool_pack);
+}
+
+static void __attribute__((constructor)) sys_exists_use(void) {
+  io_eff(CID_SYS_EXISTS, sys_exists_run, 0);
+}
+#endif  // CID_SYS_EXISTS
+
+#ifdef CID_SYS_REMOVE_FILE
+// -----------------------------------------------------------------------------
+// 8. sys.remove_file: delete a file — the rollback of an edit that created it
+// sys.remove_file(path: String) -> IO(String)
+// WriteFile cannot express deletion, so a created file's snapshot restores
+// through here rather than leaving an empty file behind.
+// -----------------------------------------------------------------------------
+static void sys_remove_file_worker(IoWork* w) {
+  char* path = w->data;
+  int ok = (unlink(path) == 0);
+  free(path);
+  w->data = strdup(ok
+    ? "removed"
+    : "error: the file could not be removed");
+  w->size = strlen(w->data);
+}
+
+Term sys_remove_file_run(Env e, Term* f, IoWork* w) {
+  w->data = io_cstr(e, f[0], &w->size);
+  return io_work(w, sys_remove_file_worker, sys_tool_pack);
+}
+
+static void __attribute__((constructor)) sys_remove_file_use(void) {
+  io_eff(CID_SYS_REMOVE_FILE, sys_remove_file_run, 0);
+}
+#endif  // CID_SYS_REMOVE_FILE

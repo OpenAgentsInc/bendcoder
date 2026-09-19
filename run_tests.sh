@@ -24,13 +24,6 @@ echo "== tools and agent helpers =="
 gcc -std=c11 -O1 -Wall -Wextra -Werror -I. test_tools.c -o "$WORK/test_tools"
 "$WORK/test_tools"
 
-echo
-echo "== C runtime compiles =="
-# Compiled to an object, not just syntax-checked: -Wunused-function only fires
-# on a real compile, and an unused static left behind by an edit is exactly the
-# warning that used to sail through green (#8).
-gcc -std=c11 -O1 -Wall -Wextra -Werror -c bender_agent.c -o "$WORK/bender_agent.o"
-
 # The FFI shims compile only inside generated Bend programs — where -Werror
 # cannot go, because generated code is not warning-clean — and then only the
 # sections a program reaches from main: nothing in the tree reaches
@@ -89,6 +82,8 @@ void  io_eff(u32 cid, Effect run, u32 need);
 #define CID_CHOSEN  12
 #define CID_SCORED  13
 #define CID_NOULED  14
+#define CID_SYS_EXISTS      15
+#define CID_SYS_REMOVE_FILE 16
 PRELUDE
 for f in sys_c.c json_parse_c.c typesafe_c.c openrouter_c.c; do
   gcc -std=c11 -O1 -Wall -Wextra -Werror -c -I. \
@@ -225,7 +220,7 @@ local_refs() {
   } 2>/dev/null
 }
 SEEN="$WORK/covered.txt"; : > "$SEEN"
-queue="run_tests.sh test_tools.c bender_agent.c"
+queue="run_tests.sh test_tools.c sys_c.c"
 queue="$queue $(grep -l '^#|' *.bend 2>/dev/null)"
 queue="$queue action.bend bender_agent.bend call_typesafe.bend PROOF.bend tool_read.bend"
 queue="$queue *.sh *.md docs/*.md"

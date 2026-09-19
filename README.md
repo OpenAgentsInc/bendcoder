@@ -37,8 +37,8 @@ this is the context the agent has before it edits Bend.
 
 The three tools Bender uses to change code are ported from [`~/coder`](https://github.com/OpenAgentsInc/coder)
 (`crates/coder-tools/src/cc/{read,write,edit}.rs`) into plain C in `tools_c.h`,
-shared by the Bend FFI layer (`sys_c.c`) and the agent runtime (`bender_agent.c`)
-so there is one implementation rather than one per caller.
+wrapped by the Bend FFI layer (`sys_c.c`) so there is one implementation
+rather than one per caller.
 
 | Tool | Behaviour |
 | --- | --- |
@@ -109,13 +109,14 @@ Classify -> anchor the edit -> Generate new text -> Edit applies it -> verify ->
   not as a clean pass — a green run only says something about the files the
   suite actually reads. A custom verify command can print the same lines to
   take part.
-- **Roll back.** Every file the edit touches is snapshotted before its first
-  hunk lands, and all are restored when verification fails or a mid-batch
-  hunk does — a file the batch created is removed — so a bad patch never
-  leaves the tree broken. The failure goes back into the state and the next
-  `Classify` round sees it.
+- **Roll back.** The file is snapshotted before the edit lands, and restored
+  when verification fails or the edit is refused — a file the edit created is
+  removed outright — so a bad patch never leaves the tree broken. The failure
+  goes back into the state and the next `Classify` round sees it.
 - **Stay in the repo.** Absolute paths and anything containing `..` are refused
-  before they reach the tools.
+  before they reach the tools, and an edit is only drafted against a file the
+  loop has already read — a refused edit names the file it needed, which the
+  next read serves first.
 
 `read_code` lists the repository on its first pass, then hands that listing to
 `Classify` as a `Choice` — which file to read next is a closed set, so it is
@@ -125,17 +126,10 @@ carries a cursor, so choosing it again serves the next page rather than the
 first one, and a file read to the end drops out of the options. `search_code`
 greps the repository for a literal string, which is how the agent finds the
 file that matters instead of guessing a name; a pattern is open-ended text,
-so it stays with the generation model.
-`read_code` lists the repository on its first pass, then asks the model which
-file to read next and serves it with line numbers. Each file carries a cursor,
-so naming it again serves the next page rather than the first one, and a reply
-that leaks the model's reasoning is mined for a path that actually exists rather
-than taken at face value. `search_code` greps the repository for a literal
-string, which is how the agent finds the file that matters instead of guessing
-a name. Every pattern it runs is recorded with its outcome: the picker is told
-which strings were already tried, a re-proposed one is skipped rather than
-grepped again, and a search that keeps missing is nudged at `read_code`, which
-can only add information.
+so it stays with the generation model. Every pattern it runs is recorded with
+its outcome: a re-proposed one is skipped rather than grepped again, and a
+search that keeps missing is nudged at `read_code`, which can only add
+information.
 
 `BENDER_MAX_STEPS` raises the step ceiling (default 6) for a longer run.
 
@@ -149,51 +143,51 @@ BENDER_MAX_STEPS=8 ./run_bender.sh "Add a greet_bender function to hello.bend, k
 ./run_tests.sh
 ```
 
-Covers the file tools, the agent's edit-block parser and path guard, and checks
-that the C runtime compiles and both Bend programs still check and build —
-with warnings as errors on the repository's own C and on every section of the
-FFI shims, a `bash -n` over the scripts, a structural check on the markdown
-(fences balanced, no section break splitting an introduction from its block),
-and `call_typesafe.bend` compiled. The path guard is also a proof gate:
+Covers the file tools, the Bend modules' `#|` expectations and laws, and
+checks that every Bend program still checks and builds — with warnings as
+errors on the repository's own C and on every section of the FFI shims, a
+`bash -n` over the scripts, a structural check on the markdown (fences
+balanced, no section break splitting an introduction from its block), and
+`call_typesafe.bend` compiled. The path guard is also a proof gate:
 `guard.bend` ports `path_is_in_repo`, `LAWS.bend` states its refusal rules over
 every input, and `PROOF.bend` must fill each one for the suite to pass. This is
 also the loop's default verification target, and it reports what it covered;
 see the `COVERED:` note under Verify above.
 
-## Two agents
+## The agent
 
-`bender_agent.c` is the agent `run_bender.sh` builds and runs: it has the full
-loop, including `apply_edit` and rollback. `bender_agent.bend` is the same loop
-written in Bend — and only the loop. The modules under it:
+`bender_agent.bend` is the agent `run_bender.sh` builds and runs — the whole
+loop, including `apply_edit` and rollback. The modules under it:
 
 - `agent_primitives.bend` — `Classify`, `Generate`, the file-tool laws (`P.`)
 - `action.bend` — the `Action` type, its parse/show and the round-trip law (`A.`)
 - `parse.bend` — the sentinel edit parser, `type Edit`, `type ToolResult` (`E.`)
 - `guard.bend` — the path guard; its laws are proved in `LAWS.bend`/`PROOF.bend`
+- `reads.bend` — the loop's `Book`: read cursors, the pending read a refused
+  edit names, the search-miss and low-confidence runs (`R.`)
 - `ui.bend` — colours and rendering (`U.`)
 - `selector.bend` — the question set, the thresholds, the route table (`S.`)
 
-Its `apply_edit` runs the same anchor path (file `Choice`, window `Choice`, line
+What remains in C is only what Bend cannot express: `tools_c.h`'s byte-level
+file algorithms wrapped by `sys_c.c`, subprocess `Exec`, the TypeSafe and
+OpenRouter HTTP calls (`typesafe_c.c`, `openrouter_c.c`), and the response
+JSON extraction (`json_parse_c.c`).
+
+Its `apply_edit` runs the anchor path (file `Choice`, window `Choice`, line
 `Choice` plus the presence `Noul`, then exact bytes from the file) and falls
 back to drafting one `<<<PATH>>>`/`<<<OLD>>>`/`<<<NEW>>>` group per edit
 (a reply carrying more is refused rather than half-applied), verifies with
-`BENDER_VERIFY_CMD`, and restores the `ReadFile` snapshot with `WriteFile`,
-so a file the edit created is left empty rather than removed:
+`BENDER_VERIFY_CMD`, and restores the `ReadFile` snapshot with `WriteFile` —
+or removes the file outright when the edit is what created it.
 
-```bash
-bend bender_agent.bend -o bender_loop.c
-gcc -std=c11 -O1 -I. bender_loop.c -lpthread -lm -o bender_loop_bin
-BENDER_GOAL="Find where the grep match cap is set." ./bender_loop_bin
-```
-
-Bend has no `argv` — Base offers only `IO.get_env` — so the Bend loop takes its
-goal from `BENDER_GOAL` where `bender_agent.c` takes it from `argv[1]`.
+Bend has no `argv` — Base offers only `IO.get_env` — so the loop takes its
+goal from `BENDER_GOAL` and its step ceiling from `BENDER_MAX_STEPS`;
+`run_bender.sh` maps its arguments onto those.
 
 `selector.bend` is the one reviewable place the question set, the thresholds,
 and the answers-to-action table share (design rules 7 and 8): each threshold
 carries what it was tuned on, and the table is a `match` over the typed
-`LoopAnswers` with its rows pinned by laws. `bender_agent.c` mirrors it in
-`route_decision` and the `BENDER_*_FLOOR` block beside `jev_answer`.
+`LoopAnswers` with its rows pinned by laws.
 
 Bend 2.0.5 shapes that loop in ways worth knowing before editing it:
 

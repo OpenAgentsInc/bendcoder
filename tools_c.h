@@ -1,7 +1,7 @@
 // Read / Write / Edit: the three self-improvement file tools, adapted from
 // ~/coder (crates/coder-tools/src/cc/{read,write,edit}.rs) into plain C so the
-// Bend FFI layer (sys_c.c) and the agent runtime (bender_agent.c) share one
-// implementation instead of each growing its own.
+// Bend FFI layer (sys_c.c) wraps one implementation — the agent loop itself
+// lives in bender_agent.bend.
 //
 // Every entry point returns a malloc'd string the caller frees. Failures come
 // back as readable text prefixed with "error: " rather than as a status code,
@@ -174,8 +174,8 @@ static char* bender_write_bytes(const char* path, const char* data, size_t len) 
 // the BOM strip all need the file's size or its bytes. Everything downstream
 // (the split on '\n', the offset/limit selection, the "N\tline" rendering) is
 // a pure String -> String that lives in tool_read.bend, where its laws are
-// proved; tool_read below is that pure half's C mirror for bender_agent.c,
-// which serves read pages without the Bend loop. Keep them in step.
+// proved; tool_read below is that pure half's C mirror, kept so test_tools.c
+// can exercise the rendering the Bend half's laws cover. Keep them in step.
 //
 // Returns a malloc'd buffer. *code is 0 on success and *len the byte count
 // after the BOM strip; on failure *code is an errno-style category and the
@@ -228,7 +228,7 @@ static char* tool_read_io(const char* path, long limit, int* code, size_t* len) 
 // "N\tline", the format ~/coder's add_line_numbers produces, so a line number
 // quoted back by the model addresses the same line. `offset` is the first
 // line to emit (0 and 1 both mean line 1); `limit` <= 0 means "to the end of
-// the file". bender_agent.c is its only caller; sys_c.c uses tool_read_io.
+// the file". test_tools.c is its caller; sys_c.c uses tool_read_io.
 __attribute__((unused))
 static char* tool_read(const char* path, long offset, long limit) {
   if (offset < 1) offset = 1;

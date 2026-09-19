@@ -78,6 +78,22 @@ law sys.grep_file:
 def sys.grep_file(pattern, path):
   import "./sys_c.c"
 
+# "true" or "false" — the blind-edit guard's bender_exists, asked before an
+# edit to a file never read is refused.
+law sys.exists:
+  String -> IO(String)
+
+def sys.exists(path):
+  import "./sys_c.c"
+
+# Deletion as an effect: a file the edit created is removed on rollback
+# rather than left behind empty, which is what snapshotting nil meant in C.
+law sys.remove_file:
+  String -> IO(String)
+
+def sys.remove_file(path):
+  import "./sys_c.c"
+
 # ------------------------------------------------------------------------------
 # JSON String escaping
 # ------------------------------------------------------------------------------
@@ -315,6 +331,14 @@ def state_listing(s: State) -> String:
     case St{directive, step, done, obs, changed, verification, +paths, hits, left}:
       String.join(paths, "\n")
 
+# Whether the program already ran the named action — the final_answer flag
+# bender_agent.c keeps beside its state, which the end-of-fuel answer force
+# tests before overriding the route.
+def state_did(s: State, +name: String) -> Bool:
+  match s:
+    case St{directive, +step, +done, obs, changed, verification, paths, hits, left}:
+      Bool.or(String.eq(step, name), List.contains(~String, ~String.eq, done, name))
+
 # The state a run starts with: the goal as directive, the injected listing as
 # index.paths, and everything else at its empty or "unknown" initial value.
 def state.new(+directive: String, +paths: List<&2, String>, +left: U32) -> State:
@@ -322,7 +346,7 @@ def state.new(+directive: String, +paths: List<&2, String>, +left: U32) -> State
 
 # Build complete TypeSafe System One request JSON
 def build_classify_payload(state: State, qs: List<&2, Question>) -> String:
-  "{\"state\":" ++ state_to_json(state) ++ ",\"model\":\"jev-latest\",\"questions\":{" ++ questions_to_json(qs) ++ "}}"
+  "{\"state\":" ++ state_to_json(state) ++ ",\"model\":\"jev-1.13.0\",\"questions\":{" ++ questions_to_json(qs) ++ "}}"
 
 # ------------------------------------------------------------------------------
 # High-Level Classify Answer Definitions
@@ -433,6 +457,14 @@ def EditFileAll(path: String, old_str: String, new_str: String) -> IO(String):
 # appear and where.
 def Grep(pattern: String, path: String) -> IO(String):
   sys.grep_file(pattern, path)
+
+# Whether a path exists on disk — "true"/"false", which the caller compares.
+def ExistsFile(path: String) -> IO(String):
+  sys.exists(path)
+
+# Delete a file: the rollback of an edit that created it.
+def RemoveFile(path: String) -> IO(String):
+  sys.remove_file(path)
 
 # ------------------------------------------------------------------------------
 # The render, exercised: the object shape and the deliberate drop, pinned
