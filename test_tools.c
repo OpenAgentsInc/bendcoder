@@ -111,6 +111,29 @@ int main(void) {
   check(r3 && strcmp(r3, "4\tNINE") == 0, "the literal line was replaced, not a stripped one");
   free(r3);
 
+  // An old_string quoted inside an indented block — every line shifted right
+  // by a uniform run — is retried dedented, and new_string loses the same run
+  // so the file's own indentation is what lands, not the model's quoting
+  // indent.
+  char* indented_path = scratch_path("indented.c");
+  const char* indented = "def f():\n  body\nend\n";
+  char* w_indent = tool_write(indented_path, indented, strlen(indented));
+  free(w_indent);
+  char* e8 = tool_edit(indented_path, "  def f():\n    body\n  end", "  def g():\n    legs\n  end", 0);
+  check(strncmp(e8, "The file", 8) == 0, "tool_edit dedents a uniformly indented old_string");
+  free(e8);
+  char* r4 = tool_read(indented_path, 1, 3);
+  check(r4 && strcmp(r4, "1\tdef g():\n2\t  legs\n3\tend") == 0,
+        "the dedented edit writes the file's indentation, not the model's quoting indent");
+  free(r4);
+
+  // An old_string indented unevenly — lines without a common run — is not a
+  // dedent case and is still refused.
+  char* e9 = tool_edit(indented_path, "def g():\n      legs\nend", "x", 0);
+  check(strncmp(e9, "error:", 6) == 0, "dedent does not invent a match across uneven indents");
+  free(e9);
+  free(indented_path);
+
   // A write to a file that did not exist reports a creation, which is what the
   // Bend loop's rollback keys on: a created file's restore is a remove.
   char* created = scratch_path("created.txt");

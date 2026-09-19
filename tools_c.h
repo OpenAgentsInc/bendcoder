@@ -348,6 +348,49 @@ static char* bendcoder_strip_line_prefixes(const char* s, int* changed) {
   return out;
 }
 
+// The common leading whitespace run shared by every non-empty line of s —
+// zero when the text is not uniformly indented. A model that quotes the file
+// inside an indented block sends old_string with a uniform indent the file
+// does not have, which is what this measures for the fallback below.
+static size_t bendcoder_common_indent(const char* s) {
+  size_t common = (size_t)-1;
+  size_t len = strlen(s);
+  size_t i = 0;
+  while (i < len) {
+    size_t line_end = i;
+    while (line_end < len && s[line_end] != '\n') line_end++;
+    size_t ws = 0;
+    while (i + ws < line_end && (s[i + ws] == ' ' || s[i + ws] == '\t')) ws++;
+    if (i + ws < line_end && ws < common) common = ws;  // a non-empty line bounds the run
+    i = line_end + 1;
+  }
+  return common == (size_t)-1 ? 0 : common;
+}
+
+// Strip up to `width` leading space/tab characters from each line — the
+// companion of common_indent. Lines with less whitespace keep their content.
+static char* bendcoder_dedent(const char* s, size_t width) {
+  size_t len = strlen(s);
+  char* out = (char*)malloc(len + 1);
+  if (!out) return NULL;
+  size_t o = 0;
+  size_t i = 0;
+  while (i <= len) {
+    size_t line_end = i;
+    while (line_end < len && s[line_end] != '\n') line_end++;
+    size_t ws = 0;
+    while (ws < width && i + ws < line_end && (s[i + ws] == ' ' || s[i + ws] == '\t')) ws++;
+    size_t keep = line_end - i - ws;
+    memcpy(out + o, s + i + ws, keep);
+    o += keep;
+    if (line_end < len) out[o++] = '\n';
+    i = line_end + 1;
+    if (line_end >= len) break;
+  }
+  out[o] = '\0';
+  return out;
+}
+
 // When old_string does not match, "not found" is a dead end: it says what did
 // not happen, not what is true, so a model with a wrong idea of the file has
 // nothing to correct against and proposes the same text again. This locates the
@@ -466,6 +509,29 @@ static char* tool_edit(const char* path, const char* old_str, const char* new_st
     }
   }
 
+  // A model that quotes the file inside an indented block sends an
+  // old_string uniformly indented past the file's real text; the dedented
+  // spelling is tried the same way, and when it resolves the new_string is
+  // dedented by the same amount so the replacement keeps the file's
+  // indentation rather than the model's quoting indent.
+  char* dedented = NULL;
+  char* dedented_new = NULL;
+  if (matches == 0) {
+    size_t width = bendcoder_common_indent(old_str);
+    if (width > 0) {
+      dedented = bendcoder_dedent(old_str, width);
+      if (dedented) {
+        size_t dedented_matches = bendcoder_count_matches(content, dedented);
+        if (dedented_matches > 0) {
+          old_str = dedented;
+          matches = dedented_matches;
+          dedented_new = bendcoder_dedent(new_str, width);
+          if (dedented_new) new_str = dedented_new;
+        }
+      }
+    }
+  }
+
   if (matches == 0) {
     char* hint = bendcoder_nearest_hint(content, old_str);
     char* err;
@@ -482,6 +548,8 @@ static char* tool_edit(const char* path, const char* old_str, const char* new_st
         path, old_str);
     }
     free(stripped);
+    free(dedented);
+    free(dedented_new);
     free(content);
     return err;
   }
@@ -492,6 +560,8 @@ static char* tool_edit(const char* path, const char* old_str, const char* new_st
       "provide more context to uniquely identify the instance.\nString: %s",
       matches, path, old_str);
     free(stripped);
+    free(dedented);
+    free(dedented_new);
     free(content);
     return err;
   }
@@ -523,10 +593,16 @@ static char* tool_edit(const char* path, const char* old_str, const char* new_st
   free(content);
   free(search_owned);
   free(stripped);
-  if (!updated) return strdup("error: out of memory");
+  if (!updated) {
+    free(dedented);
+    free(dedented_new);
+    return strdup("error: out of memory");
+  }
 
   char* err = bendcoder_write_bytes(path, updated, updated_len);
   free(updated);
+  free(dedented);
+  free(dedented_new);
   if (err) return err;
 
   return replace_all
