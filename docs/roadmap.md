@@ -14,9 +14,9 @@ Verified autonomous envelope, demonstrated on live delegations:
 - Focused single-site changes and every loop-hardening fix the delegation
   failures exposed.
 - The full pipeline: read → search → plan → anchor/sentinel edit →
-  `WriteFile` for new files → `./run_tests.sh` verify → keep or rollback →
-  retry on the error already in the state → the goal-term sniff seeding
-  deterministic retrieval before step 1.
+  `WriteFile` for new files → `./run_tests.sh` verify → keep → repair the
+  failed draft in place on the error already in the state → the goal-term
+  sniff seeding deterministic retrieval before step 1.
 
 Outside the envelope today:
 

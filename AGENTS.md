@@ -70,14 +70,15 @@ Environment knobs:
 | `BENDCODER_GOAL` | (required) | The objective; `run_bendcoder.sh` maps its args here |
 | `BENDCODER_MAX_STEPS` | 6 | Step ceiling; each classify→act round is one step |
 | `BENDCODER_VERIFY_CMD` | `./run_tests.sh` | Suite an `apply_edit` must pass to be kept |
-| `BENDCODER_CHECK_CMD` | (unset) | Cheap per-file check run before the suite — `<file>` in the command names the changed path (else the path is appended). A failed check rolls the edit back with its error in the state; the suite never runs |
+| `BENDCODER_CHECK_CMD` | (unset) | Cheap per-file check run before the suite — `<file>` in the command names the changed path (else the path is appended). A failed check keeps the draft in place with its error in the state; the suite never runs |
 | `BENDCODER_MODEL` | `openai/gpt-oss-120b:nitro` | OpenRouter model for every `GenerateText` call |
 | `BENDCODER_BASE` | `bend base`, then `~/bend/bend2/base.bend`, `~/work/bend/bend2/base.bend` | Where the `index.base_api` digest reads base.bend; a leading `~/` expands through `HOME` |
 
 The agent edits the working tree it runs in. Run it with a clean tree so its
-work is a legible diff; a failed verify restores the file (or removes a file
-it created), so a kept-but-wrong change is the only residue to watch for —
-`./run_tests.sh` after a run is the check, `git checkout .` the undo.
+work is a legible diff; a failed verify leaves the draft on disk as the
+near-miss the retry repairs against (`facts.failed_path` names it), so a
+kept-but-wrong change is the residue to watch for — `./run_tests.sh` after
+a run is the check, `git checkout .` the undo.
 
 A run ends `[TASK COMPLETED]` when Jev judges the goal met, `[STALLED]` on a
 guard trip (missing key, repeated misses, low-confidence run), or at the step

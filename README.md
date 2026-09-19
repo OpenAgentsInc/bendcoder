@@ -86,9 +86,10 @@ overrides the OpenRouter model every `Generate` call uses (default
 moves what the loop can land. `BENDCODER_BASE` names the base.bend the
 `index.base_api` digest reads (default: `bend base`, then the usual
 `~/bend/bend2` / `~/work/bend/bend2` checkouts). Run against a clean tree: kept edits land in
-the working directory, and a failed verify restores the file — or removes it
-outright when the edit is what created it. A run ends `[TASK COMPLETED]`,
-`[STALLED]` on a guard trip, or at the step ceiling.
+the working directory, and a failed verify leaves the draft on disk — the
+state records it as `facts.failed_path` and the next `apply_edit` is a
+repair against that file rather than a fresh draft (#42). A run ends
+`[TASK COMPLETED]`, `[STALLED]` on a guard trip, or at the step ceiling.
 
 **Verify.**
 
@@ -172,7 +173,7 @@ where it used to invent `String.equals` (#44).
 the loop that lets Bendcoder change its own code:
 
 ```
-Classify -> anchor the edit -> Generate new text -> Edit applies it -> verify -> pass? keep : roll back -> Classify
+Classify -> anchor the edit -> Generate new text -> Edit applies it -> verify -> pass? keep : keep-and-repair -> Classify
 ```
 
 - **Anchor the edit.** The old text is picked out of the file rather than
@@ -201,17 +202,21 @@ Classify -> anchor the edit -> Generate new text -> Edit applies it -> verify ->
 - **Verify.** `./run_tests.sh` by default; set `BENDCODER_VERIFY_CMD` to point the
   loop at a different suite. `BENDCODER_CHECK_CMD` sets a cheaper per-file gate
   that runs first — `<file>` in the command names the changed path — and a
-  failed check rolls the edit back with its error in the state, the suite
+  failed check leaves the draft in place with its error in the state, the suite
   never run (#43). The suite ends by printing a `COVERED: <path>`
   line for every file it exercises; a pass over a file absent from that list is
   reported as "verification passed, but nothing in the suite exercises it",
   not as a clean pass — a green run only says something about the files the
   suite actually reads. A custom verify command can print the same lines to
   take part.
-- **Roll back.** The file is snapshotted before the edit lands, and restored
-  when verification fails or the edit is refused — a file the edit created is
-  removed outright — so a bad patch never leaves the tree broken. The failure
-  goes back into the state and the next `Classify` round sees it.
+- **Repair in place.** A failed verify keeps the draft on disk rather than
+  restoring it (#42): the path goes into the state as `facts.failed_path`
+  beside the error, and the retry's draft prompt shows the file's current
+  content, so the model patches a near-miss instead of resampling from
+  scratch. The broken file poisons every later verify until it is fixed or
+  reverted — restoring the earlier text is itself an `apply_edit` — and a
+  `task_complete` while a draft stands broken stalls rather than certifying
+  a red tree.
 - **Stay in the repo.** Absolute paths and anything containing `..` are refused
   before they reach the tools, and an edit is only drafted against a file the
   loop has already read — a refused edit names the file it needed, which the
@@ -326,9 +331,9 @@ edit it lands:
 `docs/self-delegation.md` is the experiment log — every failure observed,
 the fix it produced, and the boundary mapped. `docs/roadmap.md` is the
 follow-on assessment: the boundaries share one root cause (the loop samples
-rather than converging — a failed draft is rolled back and resampled instead
-of repaired, and no plan object carries progress between hunks), and the
-ordered upgrade path is tracked as issues #42–#48.
+rather than converging — resampling instead of repairing, and no plan
+object carrying progress between hunks), and the ordered upgrade path is
+tracked as issues #42–#48, of which #42–#44, #46 and #47 have landed.
 
 ## How it compares to frontier coding agents
 
@@ -348,10 +353,11 @@ A few properties are guarantees, not conventions.
   out of the file. A general agent writes `old_string` from memory and
   can produce near-misses that refuse — here the wrong text is
   unrepresentable, not merely refused.
-- **Every landed change is verified or gone.** Apply → suite → keep or
-  roll back, and the suite cannot self-certify (SUITEPASS,
+- **Every landed change is verified or visibly broken.** Apply → suite →
+  keep or keep-and-flag, and the suite cannot self-certify (SUITEPASS,
   coverage-complement). A general agent's edits are verified when it
-  chooses to check them; Bendcoder's are verified by construction.
+  chooses to check them; Bendcoder's are verified by construction — a
+  draft that fails stays on disk and in the state until it is repaired.
 - **Its decisions are calibrated and inspectable.** Every step yields
   typed answers with probabilities, routed by a table whose thresholds
   record what they were measured on. A general agent's confidence is
@@ -365,10 +371,10 @@ A few properties are guarantees, not conventions.
   see why a step rerouted. A general agent's memory is a context blob.
 - **The path guard is proved.** `LAWS.bend`/`PROOF.bend` fill the refusal
   laws — "stays in the repo" is a proof obligation, not a comment.
-- **Its failures are loud.** `[STALLED]` with a reason, rolled-back edits
-  with the compiler error in the state, a suite that refuses to pass when
-  it did not finish. The dangerous agent failure mode — confident, wrong,
-  silent — is the one it does not have.
+- **Its failures are loud.** `[STALLED]` with a reason, failed drafts left
+  on disk with the compiler error in the state, a suite that refuses to
+  pass when it did not finish. The dangerous agent failure mode —
+  confident, wrong, silent — is the one it does not have.
 
 ### Where it is weaker
 
@@ -376,8 +382,10 @@ A few properties are guarantees, not conventions.
   ~100-line recursive pure-Bend module even with a correct plan and
   explicit hints (#40 took ~8 failed runs). A frontier model emits that
   module in one shot. Raw capability, not loop design.
-- **It samples; it does not repair.** A failed draft is rolled back and
-  re-drafted from scratch rather than patched in place (#42).
+- **Repairs are one hunk at a time.** Failed drafts now stay on disk and
+  the retry patches them in place (#42), but a repair is still a single
+  sentinel group per verify — a many-site break converges error by error
+  rather than in one rewrite.
 - **No plan object.** Nothing in the state says "you are 3 of 10 hunks
   through this change," so it re-orients between hunks (#45). A general
   agent carries an explicit task list; Bendcoder's only plan is the
@@ -509,7 +517,7 @@ already running — self-editing, verified, and measured.
 ## The agent
 
 `bendcoder_agent.bend` is the agent `run_bendcoder.sh` builds and runs — the whole
-loop, including `apply_edit` and rollback. The modules under it:
+loop, including `apply_edit` and repair-in-place. The modules under it:
 
 - `agent_primitives.bend` — `Classify`, `Generate`, the file-tool laws (`P.`)
 - `action.bend` — the `Action` type, its parse/show and the round-trip law (`A.`)
@@ -533,9 +541,10 @@ Its `apply_edit` runs the anchor path (file `Choice`, window `Choice`, line
 `Choice` plus the presence `Noul`, then exact bytes from the file) and falls
 back to drafting one `<<<PATH>>>`/`<<<OLD>>>`/`<<<NEW>>>` group per edit
 (a reply carrying more is refused rather than half-applied), verifies with
-`BENDCODER_CHECK_CMD` when set and then `BENDCODER_VERIFY_CMD`, and restores
-the `ReadFile` snapshot with `WriteFile` — or removes the file outright when
-the edit is what created it.
+`BENDCODER_CHECK_CMD` when set and then `BENDCODER_VERIFY_CMD`, and keeps a
+failed draft on disk — its path becomes `facts.failed_path`, and the next
+`apply_edit` is a repair draft shown that file's current content plus the
+error (#42).
 
 Bend has no `argv` — Base offers only `IO.get_env` — so the loop takes its
 goal from `BENDCODER_GOAL` and its step ceiling from `BENDCODER_MAX_STEPS`;
