@@ -80,7 +80,9 @@ with `BENDCODER_GOAL` set from its arguments. `BENDCODER_MAX_STEPS` raises the
 different suite (default `./run_tests.sh`); `BENDCODER_MODEL` overrides the
 OpenRouter model every `Generate` call uses (default
 `openai/gpt-oss-120b:nitro`) — the knob for testing whether a stronger model
-moves what the loop can land. Run against a clean tree: kept edits land in
+moves what the loop can land. `BENDCODER_BASE` names the base.bend the
+`index.base_api` digest reads (default: `bend base`, then the usual
+`~/bend/bend2` / `~/work/bend/bend2` checkouts). Run against a clean tree: kept edits land in
 the working directory, and a failed verify restores the file — or removes it
 outright when the edit is what created it. A run ends `[TASK COMPLETED]`,
 `[STALLED]` on a guard trip, or at the step ceiling.
@@ -148,12 +150,19 @@ proved laws rather than examples in `test_tools.c`.
 ## The Self-Improvement Loop
 
 A run starts before the first model call: `git ls-files` is injected into the
-state as `index.paths`, and the goal's identifier terms — `terms.bend` splits
+state as `index.paths`, base.bend's `def`/`type` signature lines are injected
+as `index.base_api` (resolved via `BENDCODER_BASE`, else `bend base`, else
+the usual `~/bend/bend2` / `~/work/bend/bend2` checkouts, and filtered to the
+namespaces the agent writes against — String, List, Char, Nat, U32, F32,
+Bool, Maybe, Result, IO), and the goal's identifier terms — `terms.bend` splits
 the goal on non-identifier characters, keeps lowercase words of 3+ chars,
 drops a stop list, and takes the first four distinct survivors — are each
 grepped once and folded into the state as `[SNIFF]` hits. Retrieval the model
 must ask for is not called, so the deterministic retrieval travels in the
-state from step 1 rather than costing steps to rediscover.
+state from step 1 rather than costing steps to rediscover. The digest rides
+both renderings — `index.base_api` for Classify and a `[Base API]` section in
+the Generate prompts — so a draft sees `String.to_lower(s: String) -> String`
+where it used to invent `String.equals` (#44).
 
 `Classify` chooses among `read_code`, `search_code`, `run_build`, `apply_edit`,
 `generate_answer` and `task_complete` (plus a `none` escape). `apply_edit` is
@@ -370,8 +379,9 @@ A few properties are guarantees, not conventions.
   arbitrary shell, which is most of its debugging power.
 - **Its context is bounded.** ~32 KB of observations, oldest dropped;
   nuanced reasoning evaporates where a general agent holds the session.
-- **Its grep cannot see the standard library.** `P.Grep(".")` only, so it
-  invents API names against an invisible base.bend (#44).
+- **Its grep cannot see the standard library itself.** `index.base_api`
+  injects the signature digest (#44), but `P.Grep(".")` still cannot reach
+  base.bend's bodies — the names are visible, the implementations are not.
 - **No external information and no asking for help.** If the answer is
   not in the repo it does not exist, and a stall is terminal — there is
   no "ask the user" action.
@@ -498,6 +508,8 @@ loop, including `apply_edit` and rollback. The modules under it:
   edit names, the search-miss, low-confidence and declined-pick runs (`R.`)
 - `terms.bend` — the goal-term sniff: identifier terms extracted from the
   goal and grepped into the state before step 1 (`T.`)
+- `base_api.bend` — the stdlib digest: base.bend's `def`/`type` signature
+  lines, joined and namespace-filtered into `index.base_api` (`B.`)
 - `ui.bend` — colours and rendering (`U.`)
 - `selector.bend` — the question set, the thresholds, the route table (`S.`)
 
@@ -628,8 +640,9 @@ a failed request — which every consumer matches on.
 (the goal), `program` (the current step and the actions already run),
 `observations` (the bounded log of what tools returned), `facts`
 (`changed_paths` and the last `verification` verdict), `index` (injected
-retrieval: `paths` is the repository listing, `search_hits` the searches
-already run — the sniff's hits land here too) and `budget` (`steps_left`
+retrieval: `paths` is the repository listing, `base_api` the stdlib signature
+digest, `search_hits` the searches already run — the sniff's hits land here
+too) and `budget` (`steps_left`
 and the cumulative `tokens_used`) — rather than one hand-escaped string of
 `[label]:` sections, so a question can point at a field with a backticked
 path such as `observations` or `index.search_hits` (design rule 3).

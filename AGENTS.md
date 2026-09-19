@@ -71,6 +71,7 @@ Environment knobs:
 | `BENDCODER_MAX_STEPS` | 6 | Step ceiling; each classify→act round is one step |
 | `BENDCODER_VERIFY_CMD` | `./run_tests.sh` | Suite an `apply_edit` must pass to be kept |
 | `BENDCODER_MODEL` | `openai/gpt-oss-120b:nitro` | OpenRouter model for every `GenerateText` call |
+| `BENDCODER_BASE` | `bend base`, then `~/bend/bend2/base.bend`, `~/work/bend/bend2/base.bend` | Where the `index.base_api` digest reads base.bend; a leading `~/` expands through `HOME` |
 
 The agent edits the working tree it runs in. Run it with a clean tree so its
 work is a legible diff; a failed verify restores the file (or removes a file
@@ -113,6 +114,7 @@ worktree because a fresh checkout has none — env-var keys do not need that.
 - `action.bend` — the `Action` type (`A.`); `parse.bend` — edit/result parsers (`E.`)
 - `reads.bend` — the loop's `Book`: read cursors, pending read, miss/low runs (`R.`)
 - `terms.bend` — pure goal-term extraction; `run_agent` greps the survivors into the initial state before step 1 (`T.`)
+- `base_api.bend` — pure base.bend digest: `^(def|type) ` signature extraction, continuation join, namespace filter — injected as `index.base_api` (`B.`)
 - `tool_read.bend` — pure read implementation with proved laws
 - `guard.bend` / `LAWS.bend` / `PROOF.bend` — the path guard and its proofs
 - `tools_c.h` — byte-level file algorithms (Read/Write/Edit/Grep)
