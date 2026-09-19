@@ -400,8 +400,8 @@ def act_generate_answer(+state: P.State, +book: R.Book) -> IO(Progress):
     u1 : Unit <- IO.print(U.color_magenta("[TOOL GENERATE] Calling LLM (OpenRouter) to generate code ..."))
     gen : String <- P.GenerateText(
       "openai/gpt-oss-120b:nitro",
-      "You are Bendcoder, an autonomous coding agent written in Bend2. Produce concise, direct code.",
-      "State:\n" ++ P.state_text(state) ++ "\nTask: Describe the single next change that would advance this goal."
+      "You are Bendcoder, an autonomous coding agent written in Bend2. Your repository's sources are Bend2 (.bend) and C (.c/.h) only -- the goal may quote a reference implementation in another language, but every change you propose lands in this repository's own files. Produce concise, direct code.",
+      "State:\n" ++ P.state_text(state) ++ "\nTask: Describe the single next change that would advance this goal, naming the repository file it lands in."
     )
     report("Generated Plan", gen, book)
 
