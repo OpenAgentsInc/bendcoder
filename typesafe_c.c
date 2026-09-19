@@ -110,16 +110,27 @@ static void typesafe_call_worker(IoWork* w) {
   close(bfd);
 
   int status = 0;
+  srand((unsigned)time(NULL));
+
   int attempt;
   for (attempt = 1; attempt <= BENDCODER_TS_MAX_ATTEMPTS; attempt++) {
+    // The SDK's x-typesafe-retry-count header goes on attempts after the
+    // first, numbered from 1 — the count of retries, not of attempts.
+    char retry_cnt_hdr[64] = "";
+    if (attempt > 1) {
+      snprintf(retry_cnt_hdr, sizeof(retry_cnt_hdr),
+               "-H \"x-typesafe-retry-count: %d\" ", attempt - 1);
+    }
+
     char cmd[1024];
     snprintf(cmd, sizeof(cmd),
       "curl -s -X POST https://api.typesafe.ai/v1/systemone "
       "-H \"Authorization: Bearer %s\" "
       "-H \"Content-Type: application/json\" "
+      "%s"
       "-D %s -o %s -w '%%{http_code}' "
       "-d @%s",
-      key, hdr_path, body_path, tmp_payload);
+      key, retry_cnt_hdr, hdr_path, body_path, tmp_payload);
 
     FILE* pipe = popen(cmd, "r");
     char codebuf[32] = {0};
@@ -130,8 +141,20 @@ static void typesafe_call_worker(IoWork* w) {
     }
     status = atoi(codebuf);
 
-    if ((status != 429 && status != 529) || attempt == BENDCODER_TS_MAX_ATTEMPTS) break;
+    // Retryable is the SDK's set — 408, 429, and every 5xx — not just the
+    // 429/529 pair the contract documents.
+    int is_retryable = (status == 408) || (status == 429) ||
+                       (status >= 500 && status <= 599);
+    if (!is_retryable || attempt == BENDCODER_TS_MAX_ATTEMPTS) break;
+
     long wait_ms = classify_retry_wait_ms(hdr_path, attempt - 1);
+
+    // The SDK jitters the wait so two agents do not retry in lockstep:
+    // subtract up to a quarter of the computed delay.
+    if (wait_ms > 0) {
+      wait_ms -= rand() % (wait_ms / 4 + 1);
+    }
+
     fprintf(stderr, "[typesafe] HTTP %d; retrying in %ld ms (attempt %d of %d)\n",
             status, wait_ms, attempt + 1, BENDCODER_TS_MAX_ATTEMPTS);
     struct timespec ts = { wait_ms / 1000, (wait_ms % 1000) * 1000000L };
