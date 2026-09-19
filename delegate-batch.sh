@@ -26,6 +26,15 @@ if [ -n "$(git status --porcelain)" ]; then
   exit 1
 fi
 
+# Pull before branching. The worktrees fork from HEAD, so a stale HEAD means
+# every agent works against a repository that has already moved -- and an issue
+# closed upstream gets delegated anyway. Both have happened.
+echo "Fetching origin..."
+git pull --ff-only --quiet || {
+  echo "Cannot fast-forward onto origin/main; reconcile first."
+  exit 1
+}
+
 WT_ROOT="$(cd .. && pwd)/bendcoder-wt"
 mkdir -p "$WT_ROOT"
 BASE="$(git rev-parse --abbrev-ref HEAD)"
@@ -46,7 +55,12 @@ run_one() {
     [ -f "$DIR/$f" ] && cp "$DIR/$f" "$wt/$f"
   done
 
-  local title body
+  local title body state
+  state="$(gh issue view "$issue" --json state -q .state)"
+  if [ "$state" != "OPEN" ]; then
+    echo "#$issue: SKIPPED ($state upstream)"
+    return 0
+  fi
   title="$(gh issue view "$issue" --json title -q .title)"
   body="$(gh issue view "$issue" --json body -q .body)"
 
