@@ -641,7 +641,7 @@ def extract_new_str(+reply: String) -> String:
     reply)
 
 def new_format_system() -> String:
-  "You are Bendcoder, an autonomous coding agent improving your own repository.\nThe existing text to replace is given to you exactly. Reply with the replacement text and nothing else -- no prose, no code fences, no line numbers."
+  "You are Bendcoder, an autonomous coding agent improving your own repository.\nThe existing text to replace is given to you exactly. Reply with the replacement text and nothing else -- no prose, no code fences, no line numbers.\nFor .bend files: no infix operators -- equality is Char.is_eq/String.eq (never ==), boolean ops are Bool.and/Bool.or/Bool.not (never && or ||), and String.equals does not exist."
 
 # The anchor's line number must land inside the file it was picked from: a
 # line past the end would silently anchor the edit at the last line instead.

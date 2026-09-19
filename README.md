@@ -30,6 +30,7 @@ this is the context the agent has before it edits Bend.
 - **Qualified constructors** – constructors of an imported type must be qualified in patterns, e.g., `case A.ReadCode{}:`. Not in the guide.
 - **FFI law handling** – FFI is `law` + `def … import "./file.c"`, and Bend emits `#define CID_<NAME>` only for laws reachable from `main` — hence the `#ifdef` guards in `sys_c.c` (#5).
 - **Typed let in `do`** – inside a `do` block a `let` needs its annotation: `x : String = v`, not `x = v`.
+- **No infix `==`/`&&`/`||`** – equality and boolean ops are named functions: `Char.is_eq(c, '_')`, `String.eq(a, b)`, `Nat.eq`, `Bool.and`/`Bool.or`/`Bool.not`. `String.equals` does not exist. This is the single most common syntax error a generative model makes here — a `c == '_'` or `x && y` fails the parse before any type check runs.
 
 ---
 
