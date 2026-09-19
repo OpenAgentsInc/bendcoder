@@ -17,7 +17,13 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$DIR"
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/bendcoder_tests_XXXXXX")"
-trap 'rm -rf "$WORK"' EXIT
+# The suite guards edits, so it must not be able to pass vacuously: an edit
+# once renumbered a heredoc terminator, which swallowed the rest of this
+# script into the prelude, exited 0, and "verified" itself. Only a run that
+# reaches the final line sets SUITEPASS; anything earlier is a loud failure
+# even when every command that ran succeeded.
+SUITEPASS=0
+trap 'rm -rf "$WORK"; [ "$SUITEPASS" = 1 ] || { echo "SUITE TRUNCATED: did not reach the end of run_tests.sh"; exit 1; }' EXIT
 export BENDCODER_TEST_DIR="$WORK/scratch"
 
 echo "== tools and agent helpers =="
@@ -84,6 +90,7 @@ void  io_eff(u32 cid, Effect run, u32 need);
 #define CID_NOULED  14
 #define CID_SYS_EXISTS      15
 #define CID_SYS_REMOVE_FILE 16
+#define CID_EXTRACT_USAGE 17
 PRELUDE
 for f in sys_c.c json_parse_c.c typesafe_c.c openrouter_c.c; do
   gcc -std=c11 -O1 -Wall -Wextra -Werror -c -I. \
@@ -247,3 +254,4 @@ done
 
 echo
 echo "All checks passed."
+SUITEPASS=1
