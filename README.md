@@ -19,6 +19,24 @@ Rather than dozens of ad-hoc tools, brittle parsers, and fragile conversational 
    - Powered by **OpenRouter** (or any OpenAI-compatible provider like Gemini / Ollama).
    - Produces code synthesis, diff generation, and solutions when `Classify` determines generation is required.
 
+## How it uses Jev
+
+Jev — TypeSafe's System One model, reached at `api.typesafe.ai` with a
+`TYPESAFE_API_KEY` — is the whole decision layer. Once per step, Bend code
+packs the loop's structured state (`directive`, `program`, `observations`,
+`facts`, `index`, `budget`) into one JSON object and sends it with a map of
+typed questions in a single batched call: a `Choice` over the action set
+(`read_code`, `search_code`, `apply_edit`, `run_build`, `generate_answer`,
+`task_complete`, `none`), `Noul`s like `repeats` and `task_done`, `Score`s
+like `risk` and `progress`, and — this is the part that makes edits
+unfabricatable — `Choice` questions over closed candidate sets for the
+arguments: which file, which window, which line anchor. Jev answers every
+question at once, each with a probability and a confidence, in about a
+hundred milliseconds; it emits no text, so it can select but never invent.
+`selector.bend` then routes those typed answers through its thresholds —
+the 0.45 general floor, the 0.65 edit floor, the spent-floor and
+retry-edit rules — and code executes exactly the effect that was chosen.
+
 ---
 
 ## Bend Constraints (Bend 2.0.5)
