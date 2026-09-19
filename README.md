@@ -235,6 +235,10 @@ explicit:
   verification stands failed is a retry informed by a compiler error the
   state already carries — it acts under the floor rather than rerouting, and
   it is not counted as a flail.
+- **Resume on the read that landed.** A refused edit names the file it
+  needed and the next read serves it first; once it has, the Book records
+  the precondition met and an `apply_edit` under the floor acts — the read
+  the floor exists to buy has arrived.
 - **Flail halt.** Three consecutive under-floor reroutes stop the run rather
   than burning fuel.
 - **Loop guards.** An edit to a file never read reroutes to a read; an answer
@@ -244,8 +248,9 @@ explicit:
 
 This bookkeeping travels as a typed `Book` (`reads.bend`) inside the loop's
 `Progress` — Bend has no globals, so the per-file read cursors, the pending
-read a refused edit names, the search-miss run, the declined-pick run and the
-under-floor tally are fields the handlers hand back each step.
+read a refused edit names and the record that the named read has since
+landed, the search-miss run, the declined-pick run and the under-floor
+tally are fields the handlers hand back each step.
 
 ### Token accounting
 

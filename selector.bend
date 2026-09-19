@@ -244,6 +244,18 @@ def answer_retry_edit(+a: P.Answer, failed: Bool) -> Bool:
     case _:
       False{}
 
+# The landed-read rule, on the unparsed answer for the loop's tally: a Chosen
+# apply_edit after the read a refused edit named has been served is a
+# resumption informed by pages already in the state — it acts under the
+# floor, and it is not a reroute, so it does not bump the under-floor run
+# either. The route reads the same flag from the Book.
+def answer_met_edit(+a: P.Answer, met: Bool) -> Bool:
+  match a:
+    case P.Chosen{+choice, confidence}:
+      Bool.and(met, String.eq(choice, "apply_edit"))
+    case _:
+      False{}
+
 # The route a spent floor produces: act, except `done`, which keeps
 # re-reading — a persistent weak preference gets the guarded path, a
 # persistent weak completion gets the flail halt.
@@ -336,8 +348,11 @@ def progress_low(+a: P.Answer) -> Bool:
 # the old dispatch split them. `unread` is the loop's "nothing read yet" —
 # read_phase == 0 in the C table, which the two guard rows test. `reads_out`
 # is the picker's own verdict that nothing left is worth reading, which turns
-# a read_code decision into the dead-read row.
-def route.chosen(a: Maybe<&2, A.Action>, is_none: Bool, +confidence: F32, repeats: P.Answer, asked: P.Answer, risk: P.Answer, progress: P.Answer, +unread: Bool, +stuck: Bool, +spent: Bool, +reads_out: Bool, +failed: Bool) -> Route:
+# a read_code decision into the dead-read row. `met` is the Book's record
+# that the read a refused edit named has landed — like a standing verify
+# failure it lets an under-floor apply_edit act, because the read the floor
+# exists to buy has already been bought.
+def route.chosen(a: Maybe<&2, A.Action>, is_none: Bool, +confidence: F32, repeats: P.Answer, asked: P.Answer, risk: P.Answer, progress: P.Answer, +unread: Bool, +stuck: Bool, +spent: Bool, +reads_out: Bool, +failed: Bool, +met: Bool) -> Route:
   match a is_none:
     case _ True{}:
       Stop{"Classify reported that no listed action fits the current state."}
@@ -346,7 +361,7 @@ def route.chosen(a: Maybe<&2, A.Action>, is_none: Bool, +confidence: F32, repeat
     case Some{+act} _:
       route.gate(
         Bool.and(under_floor(act, confidence),
-          Bool.not(Bool.and(failed, act_is_edit(act)))),
+          Bool.not(Bool.and(act_is_edit(act), Bool.or(failed, met)))),
         spent,
         noul_above(repeats, repeats_floor()),
         Bool.and(scored_top(risk, risk_top()), unasked(asked)),
@@ -359,10 +374,10 @@ def route.chosen(a: Maybe<&2, A.Action>, is_none: Bool, +confidence: F32, repeat
 # The `action` answer's own case decides the step. A missing or mistyped
 # answer halts the loop rather than falling through to a generation it never
 # chose — #32's case.
-def route.action(+action: P.Answer, repeats: P.Answer, asked: P.Answer, risk: P.Answer, progress: P.Answer, +unread: Bool, +stuck: Bool, +spent: Bool, +reads_out: Bool, +failed: Bool) -> Route:
+def route.action(+action: P.Answer, repeats: P.Answer, asked: P.Answer, risk: P.Answer, progress: P.Answer, +unread: Bool, +stuck: Bool, +spent: Bool, +reads_out: Bool, +failed: Bool, +met: Bool) -> Route:
   match action:
     case P.Chosen{+choice, +confidence}:
-      route.chosen(A.parse_action(choice), String.eq(choice, "none"), confidence, repeats, asked, risk, progress, unread, stuck, spent, reads_out, failed)
+      route.chosen(A.parse_action(choice), String.eq(choice, "none"), confidence, repeats, asked, risk, progress, unread, stuck, spent, reads_out, failed, met)
     case P.Missing{+reason}:
       Stop{"Classify returned no answer: " ++ reason}
     case P.Scored{+score, confidence}:
@@ -373,10 +388,11 @@ def route.action(+action: P.Answer, repeats: P.Answer, asked: P.Answer, risk: P.
 # The whole table: the step's typed answers in, the loop's route out. `spent`
 # is the Book's under-floor run — the reroutes the floor already bought.
 # `reads_out` is its declined-pick run — the reads the picker refused.
-def route(a: LoopAnswers, +unread: Bool, +stuck: Bool, +spent: Bool, +reads_out: Bool, +failed: Bool) -> Route:
+# `met` is its discharged want — the read a refused edit named, landed.
+def route(a: LoopAnswers, +unread: Bool, +stuck: Bool, +spent: Bool, +reads_out: Bool, +failed: Bool, +met: Bool) -> Route:
   match a:
     case Ans{+action, blocked, repeats, asked, risk, +progress}:
-      route.action(action, repeats, asked, risk, progress, unread, stuck, spent, reads_out, failed)
+      route.action(action, repeats, asked, risk, progress, unread, stuck, spent, reads_out, failed, met)
 
 # ------------------------------------------------------------------------------
 # The edit anchor: a Choice over line ids instead of transcribed text
@@ -770,19 +786,19 @@ def Selector.floor_first(a): {==}
 
 # LAW: `none` halts with its reason, whatever the other answers say
 law Selector.none_halts:
-  {route(Ans{P.Chosen{"none", 0.9}, P.Nouled{0.1}, P.Nouled{0.9}, P.Nouled{0.1}, P.Scored{1.9, 0.9}, P.Scored{0.0, 0.9}}, False{}, False{}, False{}, False{}, False{})
+  {route(Ans{P.Chosen{"none", 0.9}, P.Nouled{0.1}, P.Nouled{0.9}, P.Nouled{0.1}, P.Scored{1.9, 0.9}, P.Scored{0.0, 0.9}}, False{}, False{}, False{}, False{}, False{}, False{})
     == Stop{"Classify reported that no listed action fits the current state."} : Route}
 def Selector.none_halts(): {==}
 
 # LAW: a decision naming no action halts with its reason
 law Selector.unparseable_halts:
-  {route(Ans{P.Chosen{"bogus", 0.9}, P.Nouled{0.1}, P.Nouled{0.9}, P.Nouled{0.1}, P.Scored{1.9, 0.9}, P.Scored{0.0, 0.9}}, False{}, False{}, False{}, False{}, False{})
+  {route(Ans{P.Chosen{"bogus", 0.9}, P.Nouled{0.1}, P.Nouled{0.9}, P.Nouled{0.1}, P.Scored{1.9, 0.9}, P.Scored{0.0, 0.9}}, False{}, False{}, False{}, False{}, False{}, False{})
     == Stop{"Classify returned a decision that names no action."} : Route}
 def Selector.unparseable_halts(): {==}
 
 # LAW: a missing answer halts with the reason it carried
 law Selector.missing_halts:
-  {route(Ans{P.Missing{"rate limited"}, P.Nouled{0.1}, P.Nouled{0.9}, P.Nouled{0.1}, P.Scored{1.9, 0.9}, P.Scored{0.0, 0.9}}, False{}, False{}, False{}, False{}, False{})
+  {route(Ans{P.Missing{"rate limited"}, P.Nouled{0.1}, P.Nouled{0.9}, P.Nouled{0.1}, P.Scored{1.9, 0.9}, P.Scored{0.0, 0.9}}, False{}, False{}, False{}, False{}, False{}, False{})
     == Stop{"Classify returned no answer: rate limited"} : Route}
 def Selector.missing_halts(): {==}
 
@@ -838,8 +854,8 @@ def show_route(r: Route) -> String:
     case Stop{+reason}:
       "halt(" ++ reason ++ ")"
 
-def probe(+label: String, a: LoopAnswers, unread: Bool, stuck: Bool, spent: Bool, reads_out: Bool, failed: Bool) -> IO(Unit):
-  IO.print(label ++ " -> " ++ show_route(route(a, unread, stuck, spent, reads_out, failed)))
+def probe(+label: String, a: LoopAnswers, unread: Bool, stuck: Bool, spent: Bool, reads_out: Bool, failed: Bool, met: Bool) -> IO(Unit):
+  IO.print(label ++ " -> " ++ show_route(route(a, unread, stuck, spent, reads_out, failed, met)))
 
 def show_opt(o: P.OptionPair) -> String:
   match o:
@@ -858,28 +874,30 @@ def aprobe(+label: String, r: AnchorRoute) -> IO(Unit):
 
 def main() -> IO(Unit):
   do IO<Unit>:
-    u1 : Unit <- probe("confident read_code",       Ans{P.Chosen{"read_code", 0.9},       P.Nouled{0.1}, P.Nouled{0.1}, P.Nouled{0.1}, P.Scored{0.2, 0.8}, P.Scored{0.1, 0.9}}, False{}, False{}, False{}, False{}, False{})
-    u2 : Unit <- probe("mid-confidence read_code",  Ans{P.Chosen{"read_code", 0.5},       P.Nouled{0.1}, P.Nouled{0.1}, P.Nouled{0.1}, P.Scored{0.2, 0.8}, P.Scored{0.1, 0.9}}, False{}, False{}, False{}, False{}, False{})
-    u3 : Unit <- probe("mid-confidence apply_edit", Ans{P.Chosen{"apply_edit", 0.5},      P.Nouled{0.1}, P.Nouled{0.1}, P.Nouled{0.9}, P.Scored{0.2, 0.8}, P.Scored{0.1, 0.9}}, False{}, False{}, False{}, False{}, False{})
-    u4 : Unit <- probe("low-confidence answer",     Ans{P.Chosen{"generate_answer", 0.3}, P.Nouled{0.1}, P.Nouled{0.1}, P.Nouled{0.1}, P.Scored{0.2, 0.8}, P.Scored{0.1, 0.9}}, False{}, False{}, False{}, False{}, False{})
-    u5 : Unit <- probe("repeats high",              Ans{P.Chosen{"search_code", 0.9},     P.Nouled{0.1}, P.Nouled{0.9}, P.Nouled{0.1}, P.Scored{0.2, 0.8}, P.Scored{0.1, 0.9}}, False{}, False{}, False{}, False{}, False{})
-    u6 : Unit <- probe("top risk, unasked",         Ans{P.Chosen{"apply_edit", 0.9},      P.Nouled{0.1}, P.Nouled{0.1}, P.Nouled{0.1}, P.Scored{1.8, 0.8}, P.Scored{0.1, 0.9}}, False{}, False{}, False{}, False{}, False{})
-    u7 : Unit <- probe("top risk, asked",           Ans{P.Chosen{"apply_edit", 0.9},      P.Nouled{0.1}, P.Nouled{0.1}, P.Nouled{0.9}, P.Scored{1.8, 0.8}, P.Scored{0.1, 0.9}}, False{}, False{}, False{}, False{}, False{})
-    u8 : Unit <- probe("none",                      Ans{P.Chosen{"none", 0.9},            P.Nouled{0.1}, P.Nouled{0.1}, P.Nouled{0.1}, P.Scored{0.2, 0.8}, P.Scored{0.1, 0.9}}, False{}, False{}, False{}, False{}, False{})
-    u9 : Unit <- probe("names no action",           Ans{P.Chosen{"bogus", 0.9},           P.Nouled{0.1}, P.Nouled{0.1}, P.Nouled{0.1}, P.Scored{0.2, 0.8}, P.Scored{0.1, 0.9}}, False{}, False{}, False{}, False{}, False{})
-    u10 : Unit <- probe("missing",                  Ans{P.Missing{"rate limited"},        P.Nouled{0.1}, P.Nouled{0.1}, P.Nouled{0.1}, P.Scored{0.2, 0.8}, P.Scored{0.1, 0.9}}, False{}, False{}, False{}, False{}, False{})
-    u11 : Unit <- probe("edit, nothing read",       Ans{P.Chosen{"apply_edit", 0.9},      P.Nouled{0.1}, P.Nouled{0.1}, P.Nouled{0.9}, P.Scored{0.2, 0.8}, P.Scored{0.1, 0.9}}, True{}, False{}, False{}, False{}, False{})
-    u12 : Unit <- probe("answer, nothing read",     Ans{P.Chosen{"generate_answer", 0.9}, P.Nouled{0.1}, P.Nouled{0.1}, P.Nouled{0.1}, P.Scored{0.2, 0.8}, P.Scored{0.1, 0.9}}, True{}, False{}, False{}, False{}, False{})
-    u13 : Unit <- probe("edit, read done",          Ans{P.Chosen{"apply_edit", 0.9},      P.Nouled{0.1}, P.Nouled{0.1}, P.Nouled{0.9}, P.Scored{0.2, 0.8}, P.Scored{0.1, 0.9}}, False{}, False{}, False{}, False{}, False{})
-    u14 : Unit <- probe("search, misses high",      Ans{P.Chosen{"search_code", 0.9},     P.Nouled{0.1}, P.Nouled{0.1}, P.Nouled{0.1}, P.Scored{0.2, 0.8}, P.Scored{0.1, 0.9}}, False{}, True{}, False{}, False{}, False{})
-    u15 : Unit <- probe("search, first miss",       Ans{P.Chosen{"search_code", 0.9},     P.Nouled{0.1}, P.Nouled{0.1}, P.Nouled{0.1}, P.Scored{0.2, 0.8}, P.Scored{0.1, 0.9}}, False{}, False{}, False{}, False{}, False{})
-    ua : Unit <- probe("weak edit, floor spent",    Ans{P.Chosen{"apply_edit", 0.35},     P.Nouled{0.1}, P.Nouled{0.1}, P.Nouled{0.9}, P.Scored{0.2, 0.8}, P.Scored{0.1, 0.9}}, False{}, False{}, True{}, False{}, False{})
-    ub : Unit <- probe("weak done, floor spent",    Ans{P.Chosen{"task_complete", 0.3},   P.Nouled{0.1}, P.Nouled{0.1}, P.Nouled{0.1}, P.Scored{0.2, 0.8}, P.Scored{0.1, 0.9}}, False{}, False{}, True{}, False{}, False{})
-    uc : Unit <- probe("weak read, floor spent",    Ans{P.Chosen{"read_code", 0.3},       P.Nouled{0.1}, P.Nouled{0.1}, P.Nouled{0.1}, P.Scored{0.2, 0.8}, P.Scored{0.1, 0.9}}, False{}, False{}, True{}, False{}, False{})
-    ud : Unit <- probe("read, reads out",           Ans{P.Chosen{"read_code", 0.9},       P.Nouled{0.1}, P.Nouled{0.1}, P.Nouled{0.1}, P.Scored{0.2, 0.8}, P.Scored{0.1, 0.9}}, False{}, False{}, False{}, True{}, False{})
-    ue : Unit <- probe("edit, reads out",           Ans{P.Chosen{"apply_edit", 0.9},      P.Nouled{0.1}, P.Nouled{0.1}, P.Nouled{0.9}, P.Scored{0.2, 0.8}, P.Scored{0.1, 0.9}}, False{}, False{}, False{}, True{}, False{})
-    uf : Unit <- probe("weak edit, verify failed",  Ans{P.Chosen{"apply_edit", 0.3},      P.Nouled{0.1}, P.Nouled{0.1}, P.Nouled{0.9}, P.Scored{0.2, 0.8}, P.Scored{0.1, 0.9}}, False{}, False{}, False{}, False{}, True{})
-    ug : Unit <- probe("weak search, verify failed",Ans{P.Chosen{"search_code", 0.3},     P.Nouled{0.1}, P.Nouled{0.1}, P.Nouled{0.1}, P.Scored{0.2, 0.8}, P.Scored{0.1, 0.9}}, False{}, False{}, False{}, False{}, True{})
+    u1 : Unit <- probe("confident read_code",       Ans{P.Chosen{"read_code", 0.9},       P.Nouled{0.1}, P.Nouled{0.1}, P.Nouled{0.1}, P.Scored{0.2, 0.8}, P.Scored{0.1, 0.9}}, False{}, False{}, False{}, False{}, False{}, False{})
+    u2 : Unit <- probe("mid-confidence read_code",  Ans{P.Chosen{"read_code", 0.5},       P.Nouled{0.1}, P.Nouled{0.1}, P.Nouled{0.1}, P.Scored{0.2, 0.8}, P.Scored{0.1, 0.9}}, False{}, False{}, False{}, False{}, False{}, False{})
+    u3 : Unit <- probe("mid-confidence apply_edit", Ans{P.Chosen{"apply_edit", 0.5},      P.Nouled{0.1}, P.Nouled{0.1}, P.Nouled{0.9}, P.Scored{0.2, 0.8}, P.Scored{0.1, 0.9}}, False{}, False{}, False{}, False{}, False{}, False{})
+    u4 : Unit <- probe("low-confidence answer",     Ans{P.Chosen{"generate_answer", 0.3}, P.Nouled{0.1}, P.Nouled{0.1}, P.Nouled{0.1}, P.Scored{0.2, 0.8}, P.Scored{0.1, 0.9}}, False{}, False{}, False{}, False{}, False{}, False{})
+    u5 : Unit <- probe("repeats high",              Ans{P.Chosen{"search_code", 0.9},     P.Nouled{0.1}, P.Nouled{0.9}, P.Nouled{0.1}, P.Scored{0.2, 0.8}, P.Scored{0.1, 0.9}}, False{}, False{}, False{}, False{}, False{}, False{})
+    u6 : Unit <- probe("top risk, unasked",         Ans{P.Chosen{"apply_edit", 0.9},      P.Nouled{0.1}, P.Nouled{0.1}, P.Nouled{0.1}, P.Scored{1.8, 0.8}, P.Scored{0.1, 0.9}}, False{}, False{}, False{}, False{}, False{}, False{})
+    u7 : Unit <- probe("top risk, asked",           Ans{P.Chosen{"apply_edit", 0.9},      P.Nouled{0.1}, P.Nouled{0.1}, P.Nouled{0.9}, P.Scored{1.8, 0.8}, P.Scored{0.1, 0.9}}, False{}, False{}, False{}, False{}, False{}, False{})
+    u8 : Unit <- probe("none",                      Ans{P.Chosen{"none", 0.9},            P.Nouled{0.1}, P.Nouled{0.1}, P.Nouled{0.1}, P.Scored{0.2, 0.8}, P.Scored{0.1, 0.9}}, False{}, False{}, False{}, False{}, False{}, False{})
+    u9 : Unit <- probe("names no action",           Ans{P.Chosen{"bogus", 0.9},           P.Nouled{0.1}, P.Nouled{0.1}, P.Nouled{0.1}, P.Scored{0.2, 0.8}, P.Scored{0.1, 0.9}}, False{}, False{}, False{}, False{}, False{}, False{})
+    u10 : Unit <- probe("missing",                  Ans{P.Missing{"rate limited"},        P.Nouled{0.1}, P.Nouled{0.1}, P.Nouled{0.1}, P.Scored{0.2, 0.8}, P.Scored{0.1, 0.9}}, False{}, False{}, False{}, False{}, False{}, False{})
+    u11 : Unit <- probe("edit, nothing read",       Ans{P.Chosen{"apply_edit", 0.9},      P.Nouled{0.1}, P.Nouled{0.1}, P.Nouled{0.9}, P.Scored{0.2, 0.8}, P.Scored{0.1, 0.9}}, True{}, False{}, False{}, False{}, False{}, False{})
+    u12 : Unit <- probe("answer, nothing read",     Ans{P.Chosen{"generate_answer", 0.9}, P.Nouled{0.1}, P.Nouled{0.1}, P.Nouled{0.1}, P.Scored{0.2, 0.8}, P.Scored{0.1, 0.9}}, True{}, False{}, False{}, False{}, False{}, False{})
+    u13 : Unit <- probe("edit, read done",          Ans{P.Chosen{"apply_edit", 0.9},      P.Nouled{0.1}, P.Nouled{0.1}, P.Nouled{0.9}, P.Scored{0.2, 0.8}, P.Scored{0.1, 0.9}}, False{}, False{}, False{}, False{}, False{}, False{})
+    u14 : Unit <- probe("search, misses high",      Ans{P.Chosen{"search_code", 0.9},     P.Nouled{0.1}, P.Nouled{0.1}, P.Nouled{0.1}, P.Scored{0.2, 0.8}, P.Scored{0.1, 0.9}}, False{}, True{}, False{}, False{}, False{}, False{})
+    u15 : Unit <- probe("search, first miss",       Ans{P.Chosen{"search_code", 0.9},     P.Nouled{0.1}, P.Nouled{0.1}, P.Nouled{0.1}, P.Scored{0.2, 0.8}, P.Scored{0.1, 0.9}}, False{}, False{}, False{}, False{}, False{}, False{})
+    ua : Unit <- probe("weak edit, floor spent",    Ans{P.Chosen{"apply_edit", 0.35},     P.Nouled{0.1}, P.Nouled{0.1}, P.Nouled{0.9}, P.Scored{0.2, 0.8}, P.Scored{0.1, 0.9}}, False{}, False{}, True{}, False{}, False{}, False{})
+    ub : Unit <- probe("weak done, floor spent",    Ans{P.Chosen{"task_complete", 0.3},   P.Nouled{0.1}, P.Nouled{0.1}, P.Nouled{0.1}, P.Scored{0.2, 0.8}, P.Scored{0.1, 0.9}}, False{}, False{}, True{}, False{}, False{}, False{})
+    uc : Unit <- probe("weak read, floor spent",    Ans{P.Chosen{"read_code", 0.3},       P.Nouled{0.1}, P.Nouled{0.1}, P.Nouled{0.1}, P.Scored{0.2, 0.8}, P.Scored{0.1, 0.9}}, False{}, False{}, True{}, False{}, False{}, False{})
+    ud : Unit <- probe("read, reads out",           Ans{P.Chosen{"read_code", 0.9},       P.Nouled{0.1}, P.Nouled{0.1}, P.Nouled{0.1}, P.Scored{0.2, 0.8}, P.Scored{0.1, 0.9}}, False{}, False{}, False{}, True{}, False{}, False{})
+    ue : Unit <- probe("edit, reads out",           Ans{P.Chosen{"apply_edit", 0.9},      P.Nouled{0.1}, P.Nouled{0.1}, P.Nouled{0.9}, P.Scored{0.2, 0.8}, P.Scored{0.1, 0.9}}, False{}, False{}, False{}, True{}, False{}, False{})
+    uf : Unit <- probe("weak edit, verify failed",  Ans{P.Chosen{"apply_edit", 0.3},      P.Nouled{0.1}, P.Nouled{0.1}, P.Nouled{0.9}, P.Scored{0.2, 0.8}, P.Scored{0.1, 0.9}}, False{}, False{}, False{}, False{}, True{}, False{})
+    ug : Unit <- probe("weak search, verify failed",Ans{P.Chosen{"search_code", 0.3},     P.Nouled{0.1}, P.Nouled{0.1}, P.Nouled{0.1}, P.Scored{0.2, 0.8}, P.Scored{0.1, 0.9}}, False{}, False{}, False{}, False{}, True{}, False{})
+    uh : Unit <- probe("weak edit, read landed",    Ans{P.Chosen{"apply_edit", 0.5},      P.Nouled{0.1}, P.Nouled{0.1}, P.Nouled{0.9}, P.Scored{0.2, 0.8}, P.Scored{0.1, 0.9}}, False{}, False{}, False{}, False{}, False{}, True{})
+    ui : Unit <- probe("weak search, read landed",  Ans{P.Chosen{"search_code", 0.3},     P.Nouled{0.1}, P.Nouled{0.1}, P.Nouled{0.1}, P.Scored{0.2, 0.8}, P.Scored{0.1, 0.9}}, False{}, False{}, False{}, False{}, False{}, True{})
     u16 : Unit <- IO.print("page options -> " ++ List.show(~&2, ~P.OptionPair, ~show_opt, page_options("3\tthree\n7\tseven\nno tab here\n12\ttwelve")))
     u17 : Unit <- IO.print("window options -> " ++ List.show(~&2, ~P.OptionPair, ~show_opt, window_options(560n, 200n)))
     u18 : Unit <- IO.print("read options -> " ++ List.show(~&2, ~P.OptionPair, ~show_opt, read_options("tools_c.h\nREADME.md\ndocs\n", ["tools_c.h"])))
@@ -911,6 +929,8 @@ def main() -> IO(Unit):
 #|edit, reads out -> act(apply_edit)
 #|weak edit, verify failed -> act(apply_edit)
 #|weak search, verify failed -> reread
+#|weak edit, read landed -> act(apply_edit)
+#|weak search, read landed -> reread
 #|page options -> [3 => three, 7 => seven, 12 => twelve]
 #|window options -> [1 => lines 1 to 200, 201 => lines 201 to 400, 401 => lines 401 to 560, none => The code to change is not in any of these ranges]
 #|read options -> [README.md => README.md, docs => docs, none => No listed file is worth reading for this goal]
