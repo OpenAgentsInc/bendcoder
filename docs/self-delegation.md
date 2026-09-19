@@ -3,9 +3,10 @@
 How Bendcoder improves itself: a human writes (or the agent drafts) a GitHub
 issue, `delegate.sh` hands the issue text to the agent as its goal with a
 step budget, the agent works in a clean checkout, every edit it lands must
-pass `./run_tests.sh` or it is rolled back, and the human reviews the diff
-before committing. This file records what that loop has proven it can do,
-the failures it exposed, and the boundary it has not yet crossed.
+pass `./run_tests.sh` or the draft stays on disk as the near-miss a repair
+edit converges on (#42), and the human reviews the diff before committing.
+This file records what that loop has proven it can do, the failures it
+exposed, and the boundary it has not yet crossed.
 
 ## The workflow
 
@@ -88,6 +89,13 @@ could not emit the code. The implementation was landed manually (`96d39b7`).
 - **Keep delegated tasks small.** The model succeeds at C edits and
   single-function Bend edits; "new module" is the failure shape, so issues
   should be sized to the demonstrated envelope until it grows.
+
+Since this was written, the upgrades aimed at this boundary landed: failed
+drafts now stay on disk and the retry repairs them in place (#42), a cheap
+per-file `BENDCODER_CHECK_CMD` gates ahead of the suite (#43), and the
+base-API digest rides the state so stdlib names are visible before the
+draft (#44). Whether the boundary moved is the open question a #40-shaped
+re-delegation answers.
 
 ## The second boundary: wide mechanical threading
 

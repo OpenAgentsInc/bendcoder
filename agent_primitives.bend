@@ -86,8 +86,9 @@ law sys.exists:
 def sys.exists(path):
   import "./sys_c.c"
 
-# Deletion as an effect: a file the edit created is removed on rollback
-# rather than left behind empty, which is what snapshotting nil meant in C.
+# Deletion as an effect: WriteFile cannot express it. The loop keeps failed
+# drafts in place rather than reverting (#42), so nothing calls this today —
+# it stays in the tool surface for the same reason ExistsFile does.
 law sys.remove_file:
   String -> IO(String)
 
@@ -301,6 +302,40 @@ def verif_str(v: Verif) -> String:
     case VFail{}:
       "failed"
 
+# Whether the verdict is a failure — shared by state_verify_failed and the
+# failed_path fact, which read the same field.
+def verif_failed(v: Verif) -> Bool:
+  match v:
+    case VFail{}:
+      True{}
+    case _:
+      False{}
+
+# A Maybe<String> as a JSON value — facts.failed_path renders null when no
+# file stands broken.
+def maybe_json_str(m: Maybe<&2, String>) -> String:
+  match m:
+    case Some{+s}:
+      json_str(s)
+    case None{}:
+      "null"
+
+# The path a failed verification left on disk (#42): the last file an applied
+# edit changed, while the last verify stands failed. Derived rather than
+# stored, so it cannot go stale — a passing verify clears it, and a failure
+# with nothing changed yet has no path to name.
+def state_broken.of(+changed: List<&2, String>, failed: Bool) -> Maybe<&2, String>:
+  match failed:
+    case True{}:
+      List.last(&2, String, changed)
+    case False{}:
+      None{}
+
+def state_broken(s: State) -> Maybe<&2, String>:
+  match s:
+    case St{directive, step, done, obs, +changed, +verification, paths, base, hits, left, tokens}:
+      state_broken.of(changed, verif_failed(verification))
+
 # The whole record rendered to the request's `state` object — the shape the
 # selector design gives it, so each question's backticked path names a real
 # field. `index.paths` is capped at the Choice option cap: a listing longer
@@ -308,13 +343,14 @@ def verif_str(v: Verif) -> String:
 # stdlib signature digest, injected beside it (#44).
 def state_to_json(s: State) -> String:
   match s:
-    case St{+directive, +step, +done, +obs, +changed, verification, +paths, +base, +hits, +left, +tokens}:
+    case St{+directive, +step, +done, +obs, +changed, +verification, +paths, +base, +hits, +left, +tokens}:
       "{\"directive\":" ++ json_str(directive)
         ++ ",\"program\":{\"step\":" ++ json_str(step)
         ++ ",\"steps_done\":" ++ json_str_list(done) ++ "}"
         ++ ",\"observations\":" ++ json_str_list(bound(obs))
         ++ ",\"facts\":{\"changed_paths\":" ++ json_str_list(changed)
-        ++ ",\"verification\":" ++ json_str(verif_str(verification)) ++ "}"
+        ++ ",\"verification\":" ++ json_str(verif_str(verification))
+        ++ ",\"failed_path\":" ++ maybe_json_str(state_broken.of(changed, verif_failed(verification))) ++ "}"
         ++ ",\"index\":{\"paths\":" ++ json_str_list(List.take(&2, String, paths, 255n))
         ++ ",\"base_api\":" ++ json_str_list(base)
         ++ ",\"search_hits\":" ++ json_str_list(bound(hits)) ++ "}"
@@ -346,11 +382,7 @@ def state_listing(s: State) -> String:
 # apply_edit is a retry informed by an error already in the state rather than
 # a fresh uninformed draft.
 def state_verify_failed.go(+v: Verif) -> Bool:
-  match v:
-    case VFail{}:
-      True{}
-    case _:
-      False{}
+  verif_failed(v)
 
 def state_verify_failed(s: State) -> Bool:
   match s:
@@ -505,7 +537,8 @@ def Grep(pattern: String, path: String) -> IO(String):
 def ExistsFile(path: String) -> IO(String):
   sys.exists(path)
 
-# Delete a file: the rollback of an edit that created it.
+# Delete a file. Unused by the loop since failed drafts stay in place (#42) —
+# kept in the surface with the rest of the file tools.
 def RemoveFile(path: String) -> IO(String):
   sys.remove_file(path)
 
@@ -527,10 +560,29 @@ def demo_state() -> State:
     700n
   }
 
+# The same record after a failed verify kept its draft on disk: the failed
+# path is the last changed path, rendered as facts.failed_path (#42).
+def demo_broken() -> State:
+  St{
+    "add a greet function",
+    "apply_edit",
+    ["read_code"],
+    ["[Verification failed; edit to hello.bend left in place]:\nerror: expected ':'"],
+    ["hello.bend"],
+    VFail{},
+    ["agent_primitives.bend", "hello.bend"],
+    ["def String.to_lower(s: String) -> String:"],
+    ["greet:\nhello.bend:4:greet"],
+    4,
+    900n
+  }
+
 def main() -> IO(Unit):
   do IO<Unit>:
     u1 : Unit <- IO.print(state_to_json(demo_state()))
+    u2 : Unit <- IO.print(state_to_json(demo_broken()))
     IO.print(json_str_list(bound.with(["aaa", "bbb", "ccc"], 4n)))
 
-#|{"directive":"add a greet function","program":{"step":"search_code","steps_done":["read_code"]},"observations":["[Search for 'greet']:\nhello.bend:4:greet"],"facts":{"changed_paths":["hello.bend"],"verification":"passed"},"index":{"paths":["agent_primitives.bend","hello.bend"],"base_api":["def String.to_lower(s: String) -> String:"],"search_hits":["greet:\nhello.bend:4:greet"]},"budget":{"steps_left":5,"tokens_used":700}}
+#|{"directive":"add a greet function","program":{"step":"search_code","steps_done":["read_code"]},"observations":["[Search for 'greet']:\nhello.bend:4:greet"],"facts":{"changed_paths":["hello.bend"],"verification":"passed","failed_path":null},"index":{"paths":["agent_primitives.bend","hello.bend"],"base_api":["def String.to_lower(s: String) -> String:"],"search_hits":["greet:\nhello.bend:4:greet"]},"budget":{"steps_left":5,"tokens_used":700}}
+#|{"directive":"add a greet function","program":{"step":"apply_edit","steps_done":["read_code"]},"observations":["[Verification failed; edit to hello.bend left in place]:\nerror: expected ':'"],"facts":{"changed_paths":["hello.bend"],"verification":"failed","failed_path":"hello.bend"},"index":{"paths":["agent_primitives.bend","hello.bend"],"base_api":["def String.to_lower(s: String) -> String:"],"search_hits":["greet:\nhello.bend:4:greet"]},"budget":{"steps_left":4,"tokens_used":900}}
 #|["...2 earlier entr(ies) dropped to fit the state budget ...","ccc"]

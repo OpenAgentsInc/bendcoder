@@ -343,10 +343,11 @@ static void __attribute__((constructor)) sys_exists_use(void) {
 
 #ifdef CID_SYS_REMOVE_FILE
 // -----------------------------------------------------------------------------
-// 8. sys.remove_file: delete a file — the rollback of an edit that created it
+// 8. sys.remove_file: delete a file — deletion is the one file effect
 // sys.remove_file(path: String) -> IO(String)
-// WriteFile cannot express deletion, so a created file's snapshot restores
-// through here rather than leaving an empty file behind.
+// WriteFile cannot express. The loop keeps failed drafts in place rather
+// than reverting (#42), so nothing calls this today; it stays in the tool
+// surface for the same reason sys.exists does.
 // -----------------------------------------------------------------------------
 static void sys_remove_file_worker(IoWork* w) {
   char* path = w->data;

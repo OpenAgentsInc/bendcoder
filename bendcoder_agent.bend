@@ -79,6 +79,12 @@ def rep.verify(+label: String, +body: String, v: P.Verif) -> Report:
 def rep.edited(+label: String, +body: String, v: P.Verif, +path: String) -> Report:
   Rep{Some{"\n[" ++ label ++ "]:\n" ++ body}, None{}, Some{v}, [path], Nil{}, 0n}
 
+# A failed verify keeps the draft on disk (#42): the path is a changed path —
+# the file differs from what it was — and the failure is recorded so the
+# retry rule and the failed_path fact both see it.
+def rep.broken(+label: String, +body: String, +path: String) -> Report:
+  Rep{Some{"\n[" ++ label ++ "]:\n" ++ body}, None{}, Some{P.VFail{}}, [path], Nil{}, 0n}
+
 def rep.empty() -> Report:
   Rep{None{}, None{}, None{}, Nil{}, Nil{}, 0n}
 
@@ -479,29 +485,28 @@ def act_generate_answer(+state: P.State, +book: R.Book) -> IO(Progress):
     IO.pure(Progress, tokenized(p, toks))
 
 # ------------------------------------------------------------------------------
-# apply_edit: draft an edit, apply it, verify, roll back on failure
+# apply_edit: draft an edit, apply it, verify, repair in place on failure
 # ------------------------------------------------------------------------------
 # The Bend twin of do_apply_edit in bendcoder_agent.c, over the existing FFI:
-# ReadFile for the snapshot, EditFile to apply, Exec to verify, WriteFile to
-# restore. Where the C applies a batch of hunks as a unit, this port takes one
-# <<<PATH>>>/<<<OLD>>>/<<<NEW>>> group per edit and refuses a reply carrying
-# more rather than silently applying a part of it. The reply is parsed by
-# parse.bend into a typed Edit — Malformed, Refused or Block — so the match
-# in act_apply_edit below is exhaustive and a half-applied edit is
-# unrepresentable. Verification is two-tier (#43): BENDCODER_CHECK_CMD, when
-# set, runs a cheap per-file check first and a failure rolls the edit back
-# with its error in the state — the suite never runs — while
-# BENDCODER_VERIFY_CMD's suite still gates whether the edit is kept.
-
-# A rollback puts the file back the way it was, which for a file the edit
-# created is no file at all: WriteFile cannot express deletion, so the
-# created case goes through sys.remove_file — snapshots_restore's unlink.
-def rollback_of(existed: Bool, +path: String, +backup: String) -> IO(String):
-  match existed:
-    case True{}:
-      P.WriteFile(path, backup)
-    case False{}:
-      P.RemoveFile(path)
+# EditFile to apply, Exec to verify. Where the C applies a batch of hunks as
+# a unit, this port takes one <<<PATH>>>/<<<OLD>>>/<<<NEW>>> group per edit
+# and refuses a reply carrying more rather than silently applying a part of
+# it. The reply is parsed by parse.bend into a typed Edit — Malformed,
+# Refused or Block — so the match in act_apply_edit below is exhaustive and
+# a half-applied edit is unrepresentable. Verification is two-tier (#43):
+# BENDCODER_CHECK_CMD, when set, runs a cheap per-file check first and a
+# failure keeps the draft with its error in the state — the suite never
+# runs — while BENDCODER_VERIFY_CMD's suite still gates whether the edit
+# stands green.
+#
+# A failed verify does not roll the draft back: the file stays on disk and
+# its path goes into the state as facts.failed_path, so the next apply_edit
+# is a repair — the draft sees the file's current content plus the error
+# rather than regenerating from scratch (#42). The broken file poisons every
+# later verify until it is fixed or reverted, which is the point: the state
+# cannot go green while it is unresolved. Restoring the earlier text is
+# itself an apply_edit — one whose NEW writes the pre-edit text back — and
+# on halt the broken file is the near-miss a reviewer wants anyway.
 
 # A green suite is only evidence about the files it reads. The coverage
 # manifest run_tests.sh prints is checked for the file just edited, and a
@@ -519,57 +524,58 @@ def keep_verdict(c: R.Cover, +path: String, +out: String, +book: R.Book) -> IO(P
       +label = "Verification passed, but nothing in the suite exercises " ++ path
       remember(rep.edited(label, out, P.VPass{}, path), label, out, book)
 
-# Verification decides whether the edit stays. `ok` is the Bool the caller
-# computes from Exec's Result — the same match-on-parameter split
-# dispatch_action uses. `existed` is whether the path was on disk before the
-# edit: it decides which rollback the failure case takes.
-def after_verify(ok: Bool, status: U32, +path: String, +backup: String, +out: String, existed: Bool, +book: R.Book) -> IO(Progress):
+# Verification decides whether the edit stands green. `ok` is the Bool the
+# caller computes from Exec's Result — the same match-on-parameter split
+# dispatch_action uses. The failure case keeps the draft on disk: the error
+# is the observation, the path is the failed_path fact, and the next
+# apply_edit is a repair against the artifact itself rather than a fresh
+# sample (#42).
+def after_verify(ok: Bool, status: U32, +path: String, +out: String, +book: R.Book) -> IO(Progress):
   match ok:
     case True{}:
       keep_verdict(R.suite_cover(out, path), path, out, book)
     case False{}:
       do IO<Progress>:
-        u1 : Unit <- IO.print(U.color_yellow("   Verification failed (exit " ++ U32.show(status) ++ ") -- rolling the edit back."))
-        rb : String <- rollback_of(existed, path, backup)
-        +body : String = out ++ "\n[Restore]: " ++ rb
-        +label : String = "Verification failed; edit to " ++ path ++ " rolled back"
-        remember(rep.verify(label, body, P.VFail{}), label, body, R.book_acted(book))
+        u1 : Unit <- IO.print(U.color_yellow("   Verification failed (exit " ++ U32.show(status) ++ ") -- the draft stays on disk for repair."))
+        +body : String = out ++ "\n[Kept]: " ++ path ++ " was left as the failed draft wrote it — repair it with a further apply_edit, or restore its earlier text. Verification cannot pass while it is broken."
+        +label : String = "Verification failed; edit to " ++ path ++ " left in place"
+        remember(rep.broken(label, body, path), label, body, R.book_acted(book))
 
-def verify_outcome(r: Result<&1, &1, U32 & String, String>, +path: String, +backup: String, existed: Bool, +book: R.Book) -> IO(Progress):
+def verify_outcome(r: Result<&1, &1, U32 & String, String>, +path: String, +book: R.Book) -> IO(Progress):
   match r:
     case Done{v}:
-      after_verify(True{}, 0, path, backup, v, existed, book)
+      after_verify(True{}, 0, path, v, book)
     case Fail{e}:
       (code, out) = e
-      after_verify(False{}, code, path, backup, out, existed, book)
+      after_verify(False{}, code, path, out, book)
 
 # BENDCODER_VERIFY_CMD points the check at a different suite, as in the C loop;
 # the command arrives + so it can be both announced and run.
-def run_verify(+cmd: String, +path: String, +backup: String, existed: Bool, +book: R.Book) -> IO(Progress):
+def run_verify(+cmd: String, +path: String, +book: R.Book) -> IO(Progress):
   do IO<Progress>:
     u1 : Unit <- IO.print(U.color_magenta("   Verifying: " ++ cmd ++ " ..."))
     r : Result<&1, &1, U32 & String, String> <- P.Exec(cmd)
-    verify_outcome(r, path, backup, existed, book)
+    verify_outcome(r, path, book)
 
 # The suite is the second tier — BENDCODER_VERIFY_CMD, default ./run_tests.sh
-# — and it still decides whether the edit is kept. Split from applied.of so
-# the cheap check can hand a passing draft to it.
-def verify_suite(+path: String, +backup: String, existed: Bool, +book: R.Book) -> IO(Progress):
+# — and it still decides whether the edit stands green. Split from applied.of
+# so the cheap check can hand a passing draft to it.
+def verify_suite(+path: String, +book: R.Book) -> IO(Progress):
   do IO<Progress>:
     env : Result<&1, &1, U32 & String, String> <- IO.get_env("BENDCODER_VERIFY_CMD")
-    run_verify(Result.default(&1, &1, U32 & String, String, env, "./run_tests.sh"), path, backup, existed, book)
+    run_verify(Result.default(&1, &1, U32 & String, String, env, "./run_tests.sh"), path, book)
 
 # The cheap tier's verdict: a pass is only permission to pay for the suite,
-# and a fail is the edit refused already — rolled back with its compiler
-# error in the state through the same after_verify a failed suite takes, so
-# repair-in-place (#42) has one failure path to change.
-def check_outcome(r: Result<&1, &1, U32 & String, String>, +path: String, +backup: String, existed: Bool, +book: R.Book) -> IO(Progress):
+# and a fail is the draft left broken already — kept in place with its
+# compiler error in the state through the same after_verify a failed suite
+# takes, so repair-in-place (#42) has one failure path.
+def check_outcome(r: Result<&1, &1, U32 & String, String>, +path: String, +book: R.Book) -> IO(Progress):
   match r:
     case Done{v}:
-      verify_suite(path, backup, existed, book)
+      verify_suite(path, book)
     case Fail{e}:
       (code, out) = e
-      after_verify(False{}, code, path, backup, out, existed, book)
+      after_verify(False{}, code, path, out, book)
 
 # The command BENDCODER_CHECK_CMD names is per-file: "<file>" in it marks the
 # changed path — `bend <file> -o /tmp/x.c` typechecks without running main —
@@ -581,61 +587,55 @@ def check_command(+cmd: String, +path: String) -> String:
     E.before(cmd, "<file>") ++ path ++ E.after(cmd, "<file>"),
     cmd ++ " " ++ path)
 
-def run_check(+cmd: String, +path: String, +backup: String, existed: Bool, +book: R.Book) -> IO(Progress):
+def run_check(+cmd: String, +path: String, +book: R.Book) -> IO(Progress):
   do IO<Progress>:
     +full : String = check_command(cmd, path)
     u1 : Unit <- IO.print(U.color_magenta("   Checking: " ++ full ++ " ..."))
     r : Result<&1, &1, U32 & String, String> <- P.Exec(full)
-    check_outcome(r, path, backup, existed, book)
+    check_outcome(r, path, book)
 
 # Whether the cheap tier is configured arrives computed — a match cannot
 # inspect the env lookup — and a set-but-empty variable reads as unset, the
 # way gen_model reads BENDCODER_MODEL.
-def applied.check(has: Bool, +cmd: String, +path: String, +backup: String, existed: Bool, +book: R.Book) -> IO(Progress):
+def applied.check(has: Bool, +cmd: String, +path: String, +book: R.Book) -> IO(Progress):
   match has:
     case True{}:
-      run_check(cmd, path, backup, existed, book)
+      run_check(cmd, path, book)
     case False{}:
-      verify_suite(path, backup, existed, book)
+      verify_suite(path, book)
 
-def applied.of(r: E.ToolResult, +path: String, +backup: String, existed: Bool, +book: R.Book) -> IO(Progress):
+def applied.of(r: E.ToolResult, +path: String, +book: R.Book) -> IO(Progress):
   match r:
     case E.Err{+message}:
-      do IO<Progress>:
-        rb : String <- rollback_of(existed, path, backup)
-        report("Edit refused by the Edit tool; snapshot restored", message ++ "\n[Restore]: " ++ rb, book)
+      report("Edit refused by the Edit tool", message, book)
     case E.Ok{+output}:
       do IO<Progress>:
         u1 : Unit <- IO.print("   " ++ output)
         env : Result<&1, &1, U32 & String, String> <- IO.get_env("BENDCODER_CHECK_CMD")
         +cmd : String = String.trim(Result.default(&1, &1, U32 & String, String, env, ""))
-        applied.check(Bool.not(String.is_empty(cmd)), cmd, path, backup, existed, book)
+        applied.check(Bool.not(String.is_empty(cmd)), cmd, path, book)
 
 # EditFile reports failure as "error: ..." text over the string-only FFI;
 # E.tool_result reads that convention into a ToolResult, so the match above
 # is over a type rather than a Bool the caller computed.
-def applied(+res: String, +path: String, +backup: String, existed: Bool, +book: R.Book) -> IO(Progress):
-  applied.of(E.tool_result(res), path, backup, existed, book)
+def applied(+res: String, +path: String, +book: R.Book) -> IO(Progress):
+  applied.of(E.tool_result(res), path, book)
 
-# The snapshot is taken before the edit lands, so a refused apply or a
-# failed verify can put the file back the way the C loop does — and remove it
-# outright when the edit is what created it. A draft whose path does not
-# exist is a creation, not a replacement: the format's empty OLD marks it,
-# and it goes through WriteFile rather than an EditFile that could only
-# report the file missing.
+# A draft whose path does not exist is a creation, not a replacement: the
+# format's empty OLD marks it, and it goes through WriteFile rather than an
+# EditFile that could only report the file missing.
 def apply_block.go(+path: String, old_str: String, new_str: String, existed: Bool, +book: R.Book) -> IO(Progress):
   match existed:
     case True{}:
       do IO<Progress>:
         u1 : Unit <- IO.print(U.color_magenta("   Editing '" ++ path ++ "' ..."))
-        backup : String <- P.ReadFile(path)
         res : String <- P.EditFile(path, old_str, new_str)
-        applied(res, path, backup, existed, book)
+        applied(res, path, book)
     case False{}:
       do IO<Progress>:
         u1 : Unit <- IO.print(U.color_magenta("   Creating '" ++ path ++ "' ..."))
         res : String <- P.WriteFile(path, new_str)
-        applied(res, path, "", existed, book)
+        applied(res, path, book)
 
 def apply_block(+path: String, old_str: String, new_str: String, existed: Bool, +book: R.Book) -> IO(Progress):
   apply_block.go(path, old_str, new_str, existed, book)
@@ -901,6 +901,65 @@ def anchor_apply_edit(+state: P.State, +book: R.Book) -> IO(Progress):
     +listing : String = P.state_listing(state)
     anchor_have_listing(state, listing, String.is_empty(listing), book)
 
+# ------------------------------------------------------------------------------
+# The repair edit: the retry drafts against the broken file itself (#42)
+# ------------------------------------------------------------------------------
+# While the last verification stands failed, the file it failed on is still on
+# disk — a concrete artifact, not a fresh sampling problem. The retry's draft
+# therefore skips the anchor picks: the file is already known, so its current
+# content is read and shown to the model beside the error the state carries,
+# and the sentinel group is the right shape for the reply — a repair may need
+# to touch more than one anchored window. The full read also satisfies the
+# blind-edit guard the way the anchor's own read does.
+
+def repair_apply_edit.of(+state: P.State, +path: String, +book: R.Book, +cur: String, empty: Bool) -> IO(Progress):
+  match empty:
+    case True{}:
+      draft_apply_edit(state, book)
+    case False{}:
+      do IO<Progress>:
+        m : String <- gen_model()
+        +raw : String <- P.Generate(
+          m,
+          E.edit_format_system(),
+          "State so far:\n" ++ P.state_text(state)
+            ++ "\n\nThe previous edit to " ++ path ++ " failed verification and was left on disk; the error is in the state above. The file's current content is:\n"
+            ++ P.clip(cur)
+            ++ "\nDraft an edit to " ++ path ++ " that repairs the reported error — or restores the file's earlier text if the draft cannot be fixed.")
+        reply : String <- P.extract.generation(raw)
+        toks : Nat <- P.GenerateUsage(raw)
+        p : Progress <- act_apply_edit(E.parse_edit(reply), book)
+        IO.pure(Progress, tokenized(p, toks))
+
+def repair_apply_edit(+state: P.State, +path: String, +book: R.Book) -> IO(Progress):
+  do IO<Progress>:
+    u1 : Unit <- IO.print(U.color_magenta("[TOOL EDIT] Repairing the failed draft in " ++ path ++ " ..."))
+    +cur : String <- P.ReadFile(path)
+    +nlines : Nat = List.length(&2, String, String.lines(cur))
+    repair_apply_edit.of(state, path,
+      R.book_exhaust(book, path, U32.from_nat(Nat.add(1n, nlines))),
+      cur, String.is_empty(cur))
+
+# apply_edit's entry: a retry — apply_edit proposed while the last
+# verification stands failed — goes straight to the repair draft against the
+# file facts.failed_path names; anything else anchors first.
+def apply_entry(m: Maybe<&2, String>, +state: P.State, +book: R.Book) -> IO(Progress):
+  match m:
+    case Some{+path}:
+      repair_apply_edit(state, path, book)
+    case None{}:
+      anchor_apply_edit(state, book)
+
+# A "done" while a draft stands broken is not done — the state cannot go
+# green while the file is unresolved, so the run stalls with the near-miss
+# left on disk for review rather than certifying a broken tree (#42).
+def finish_guarded(m: Maybe<&2, String>) -> Progress:
+  match m:
+    case Some{+path}:
+      Stalled{"completion was chosen, but " ++ path ++ " is a failed draft still on disk — repair it or restore it; the near-miss is left for review."}
+    case None{}:
+      Finished{}
+
 # The action arrives already routed: `none` and unparseable decisions are Stop
 # rows in the selector's table upstream, so this match is over Action itself.
 def dispatch_action(a: A.Action, +state: P.State, +book: R.Book) -> IO(Progress):
@@ -912,11 +971,11 @@ def dispatch_action(a: A.Action, +state: P.State, +book: R.Book) -> IO(Progress)
     case A.RunBuild{}:
       act_run_build(book)
     case A.ApplyEdit{}:
-      anchor_apply_edit(state, book)
+      apply_entry(P.state_broken(state), state, book)
     case A.GenerateAnswer{}:
       act_generate_answer(state, book)
     case A.TaskComplete{}:
-      IO.pure(Progress, Finished{})
+      IO.pure(Progress, finish_guarded(P.state_broken(state)))
 
 # A route that is not Act lands here: the chosen action is not run and the
 # loop gathers information instead — a re-read when the picker is still
@@ -949,7 +1008,7 @@ def reroute(+reason: String, +state: P.State, +book: R.Book) -> IO(Progress):
 def run_route.forced(a: A.Action, +state: P.State, +book: R.Book) -> IO(Progress):
   match a:
     case A.TaskComplete{}:
-      IO.pure(Progress, Finished{})
+      IO.pure(Progress, finish_guarded(P.state_broken(state)))
     case _:
       do IO<Progress>:
         u1 : Unit <- IO.print(U.color_yellow("   [selector] steps are running out and no answer has been generated; answering now."))

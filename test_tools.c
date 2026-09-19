@@ -175,14 +175,14 @@ int main(void) {
   free(e_h5);
   free(indented_path);
 
-  // A write to a file that did not exist reports a creation, which is what the
-  // Bend loop's rollback keys on: a created file's restore is a remove.
+  // A write to a file that did not exist reports a creation, and the file
+  // goes away through unlink — the effect sys.remove_file exposes to Bend.
   char* created = scratch_path("created.txt");
   char* wnew = tool_write(created, "fresh\n", 6);
   check(wnew && strstr(wnew, "created") != NULL, "tool_write reports a new file as created");
   free(wnew);
   check(unlink(created) == 0 && !bendcoder_exists(created),
-        "a created file's rollback is a remove, which sys.remove_file is for");
+        "deleting a created file is the remove sys.remove_file performs");
   free(created);
 
   // ----------------------------------------------------------------------
