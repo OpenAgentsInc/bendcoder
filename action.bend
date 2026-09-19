@@ -1,12 +1,12 @@
 import Base
 
 # ==============================================================================
-# Bender Action Space
+# Bendcoder Action Space
 # ==============================================================================
 # The agent's actions as a datatype rather than a string compared with
 # String.eq in a chain. A match over Action is exhaustive: adding a seventh
 # action and forgetting to handle it is a compile error, not a fallthrough.
-# This was enum Action's twin while the loop lived in bender_agent.c.
+# This was enum Action's twin while the loop lived in bendcoder_agent.c.
 # ==============================================================================
 
 type Action is Data:

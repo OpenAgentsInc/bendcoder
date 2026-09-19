@@ -12,7 +12,7 @@ import Base
 #   * stripping the rendered "N\t" prefixes returns the lines unchanged —
 #     Read.strip_*, the round-trip Edit's fallback has depended on since #7
 #
-# tool_read in tools_c.h is the C mirror of render() for bender_agent.c;
+# tool_read in tools_c.h is the C mirror of render() for bendcoder_agent.c;
 # keep them in step.
 # ==============================================================================
 
@@ -209,7 +209,7 @@ def Read.page_count(ls, off, lim):
 # Stripping the prefixes back off
 # ------------------------------------------------------------------------------
 # A line's leading "N\t" (Read), "N:" (Grep) or leftover "\t" is metadata the
-# model copied back, not content — the C twin is bender_strip_line_prefixes
+# model copied back, not content — the C twin is bendcoder_strip_line_prefixes
 # in tools_c.h, the fallback Edit's "not found" path runs (#7).
 # Bool.pick stands in for the computed-boolean match: a match scrutinizes
 # parameters only, and two mutually recursive helpers are a forward reference

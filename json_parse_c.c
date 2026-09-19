@@ -1,4 +1,4 @@
-// JSON response extractors for Bender's C FFI.
+// JSON response extractors for Bendcoder's C FFI.
 //
 // extract.answer turns one question's object in a TypeSafe System One reply
 // into the Answer Data the caller matches on, so no consumer does a positional

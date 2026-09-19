@@ -1,10 +1,10 @@
-# bender
+# bendcoder
 
-Bender is a new coding agent written in **Bend2**, supplemented with C for network calls, HTTP requests, and systems interfaces missing in Bend2.
+Bendcoder is a new coding agent written in **Bend2**, supplemented with C for network calls, HTTP requests, and systems interfaces missing in Bend2.
 
 ## Philosophy: Two Primitives (`Classify` & `Generate`)
 
-Rather than dozens of ad-hoc tools, brittle parsers, and fragile conversational loops, Bender distills agent actions into two core primitives:
+Rather than dozens of ad-hoc tools, brittle parsers, and fragile conversational loops, Bendcoder distills agent actions into two core primitives:
 1. **`Classify` (System 1 - Fast, Calibrated Decision Making)**:
    - Powered by **TypeSafe System One** (`jev-latest`).
    - Evaluates state against typed questions (`Choice`, `Score`, `Noul`) to yield calibrated routing decisions, confidence, and probabilities in a single batched HTTP call.
@@ -45,12 +45,12 @@ environment rather than copied. Both files are git-ignored.
 **Run.**
 
 ```bash
-./run_bender.sh "Report which file defines the grep match cap."
+./run_bendcoder.sh "Report which file defines the grep match cap."
 ```
 
-`run_bender.sh` compiles `bender_agent.bend` to `bender_agent_bin` and runs it
-with `BENDER_GOAL` set from its arguments. `BENDER_MAX_STEPS` raises the
-6-step ceiling; `BENDER_VERIFY_CMD` points `apply_edit`'s verification at a
+`run_bendcoder.sh` compiles `bendcoder_agent.bend` to `bendcoder_agent_bin` and runs it
+with `BENDCODER_GOAL` set from its arguments. `BENDCODER_MAX_STEPS` raises the
+6-step ceiling; `BENDCODER_VERIFY_CMD` points `apply_edit`'s verification at a
 different suite (default `./run_tests.sh`). Run against a clean tree: kept
 edits land in the working directory, and a failed verify restores the file —
 or removes it outright when the edit is what created it. A run ends
@@ -68,7 +68,7 @@ keys needed — the suite is fully offline.
 **Delegate an issue.**
 
 ```bash
-./delegate.sh 21 12        # issue 21 to Bender, 12-step budget
+./delegate.sh 21 12        # issue 21 to Bendcoder, 12-step budget
 ./delegate-devin.sh 21     # the same contract via the Devin CLI
 ./delegate-batch.sh 34 11  # several issues in parallel worktrees
 ```
@@ -79,7 +79,7 @@ keys needed — the suite is fully offline.
 
 ## File Tools: `Read`, `Write`, `Edit`
 
-The three tools Bender uses to change code are ported from [`~/coder`](https://github.com/OpenAgentsInc/coder)
+The three tools Bendcoder uses to change code are ported from [`~/coder`](https://github.com/OpenAgentsInc/coder)
 (`crates/coder-tools/src/cc/{read,write,edit}.rs`) into plain C in `tools_c.h`,
 wrapped by the Bend FFI layer (`sys_c.c`) so there is one implementation
 rather than one per caller.
@@ -117,7 +117,7 @@ proved laws rather than examples in `test_tools.c`.
 
 `Classify` chooses among `read_code`, `search_code`, `run_build`, `apply_edit`,
 `generate_answer` and `task_complete`. `apply_edit` is the loop that lets
-Bender change its own code:
+Bendcoder change its own code:
 
 ```
 Classify -> anchor the edit -> Generate new text -> Edit applies it -> verify -> pass? keep : roll back -> Classify
@@ -146,7 +146,7 @@ Classify -> anchor the edit -> Generate new text -> Edit applies it -> verify ->
   or several spots in one — repeats the `<<<PATH>>>`/`<<<OLD>>>`/`<<<NEW>>>`
   group once per hunk before the single `<<<END>>>`, and the hunks are
   applied and verified as a unit.
-- **Verify.** `./run_tests.sh` by default; set `BENDER_VERIFY_CMD` to point the
+- **Verify.** `./run_tests.sh` by default; set `BENDCODER_VERIFY_CMD` to point the
   loop at a different suite. The suite ends by printing a `COVERED: <path>`
   line for every file it exercises; a pass over a file absent from that list is
   reported as "verification passed, but nothing in the suite exercises it",
@@ -175,10 +175,10 @@ its outcome: a re-proposed one is skipped rather than grepped again, and a
 search that keeps missing is nudged at `read_code`, which can only add
 information.
 
-`BENDER_MAX_STEPS` raises the step ceiling (default 6) for a longer run.
+`BENDCODER_MAX_STEPS` raises the step ceiling (default 6) for a longer run.
 
 ```bash
-BENDER_MAX_STEPS=8 ./run_bender.sh "Add a greet_bender function to hello.bend, keeping main working."
+BENDCODER_MAX_STEPS=8 ./run_bendcoder.sh "Add a greet_bendcoder function to hello.bend, keeping main working."
 ```
 
 ### Tests
@@ -200,7 +200,7 @@ see the `COVERED:` note under Verify above.
 
 ## The agent
 
-`bender_agent.bend` is the agent `run_bender.sh` builds and runs — the whole
+`bendcoder_agent.bend` is the agent `run_bendcoder.sh` builds and runs — the whole
 loop, including `apply_edit` and rollback. The modules under it:
 
 - `agent_primitives.bend` — `Classify`, `Generate`, the file-tool laws (`P.`)
@@ -221,12 +221,12 @@ Its `apply_edit` runs the anchor path (file `Choice`, window `Choice`, line
 `Choice` plus the presence `Noul`, then exact bytes from the file) and falls
 back to drafting one `<<<PATH>>>`/`<<<OLD>>>`/`<<<NEW>>>` group per edit
 (a reply carrying more is refused rather than half-applied), verifies with
-`BENDER_VERIFY_CMD`, and restores the `ReadFile` snapshot with `WriteFile` —
+`BENDCODER_VERIFY_CMD`, and restores the `ReadFile` snapshot with `WriteFile` —
 or removes the file outright when the edit is what created it.
 
 Bend has no `argv` — Base offers only `IO.get_env` — so the loop takes its
-goal from `BENDER_GOAL` and its step ceiling from `BENDER_MAX_STEPS`;
-`run_bender.sh` maps its arguments onto those.
+goal from `BENDCODER_GOAL` and its step ceiling from `BENDCODER_MAX_STEPS`;
+`run_bendcoder.sh` maps its arguments onto those.
 
 `selector.bend` is the one reviewable place the question set, the thresholds,
 and the answers-to-action table share (design rules 7 and 8): each threshold
@@ -254,7 +254,7 @@ distinct states, and termination is checked rather than hoped for.
 
 ## Autonomous Agent Loop & Terminal UI
 
-Bender runs an autonomous decision loop with a live terminal UI:
+Bendcoder runs an autonomous decision loop with a live terminal UI:
 ```
 State -> Classify (TypeSafe) -> Calibrated Action -> Tool Execution -> State Update -> Verification
 ```
@@ -262,13 +262,13 @@ State -> Classify (TypeSafe) -> Calibrated Action -> Tool Execution -> State Upd
 ### Running the Autonomous Loop
 
 ```bash
-./run_bender.sh
+./run_bendcoder.sh
 ```
 
 Example run session:
 ```text
 ================================================================================
-  [BENDER] Autonomous Coding Agent (Bend2 + TypeSafe + OpenRouter)
+  [BENDCODER] Autonomous Coding Agent (Bend2 + TypeSafe + OpenRouter)
 ================================================================================
 [GOAL] Initial Goal: Report which file defines the grep match cap. Do not edit any files.
 
@@ -280,14 +280,14 @@ Example run session:
 
 [TOOL SEARCH] Searching for 'MAX_MATCH' ...
    tools_c.h-547-// everything else the agent had learned.
-   tools_c.h:548:#define BENDER_GREP_MAX_MATCHES 200
+   tools_c.h:548:#define BENDCODER_GREP_MAX_MATCHES 200
 
 --------------------------------------------------------------------------------
 [STEP 2] Evaluating State with Classify (TypeSafe System One)...
 --------------------------------------------------------------------------------
 [Classify Decision] task_complete (confidence 0.72) (blocked 0.06, progress 0.9 (confidence 0.8))
 
-[TASK COMPLETED] Bender verified all goals are met!
+[TASK COMPLETED] Bendcoder verified all goals are met!
 ================================================================================
 ```
 

@@ -18,9 +18,9 @@ typedef struct {
 // seconds or an HTTP date, and only the numeric form is read. With neither
 // header the wait backs off exponentially from half a second, capped so a
 // stray header cannot stall the loop for hours. Same shape as
-// classify_retry_wait_ms in bender_agent.c; see #32.
-#define BENDER_TS_MAX_ATTEMPTS 4
-#define BENDER_TS_MAX_WAIT_MS 30000
+// classify_retry_wait_ms in bendcoder_agent.c; see #32.
+#define BENDCODER_TS_MAX_ATTEMPTS 4
+#define BENDCODER_TS_MAX_WAIT_MS 30000
 
 static long classify_retry_wait_ms(const char* header_path, int attempt) {
   long wait_ms = -1;
@@ -36,7 +36,7 @@ static long classify_retry_wait_ms(const char* header_path, int attempt) {
   }
   if (wait_ms < 0 && retry_after_s > 0) wait_ms = retry_after_s * 1000;
   if (wait_ms < 0) wait_ms = 500L << attempt;
-  if (wait_ms > BENDER_TS_MAX_WAIT_MS) wait_ms = BENDER_TS_MAX_WAIT_MS;
+  if (wait_ms > BENDCODER_TS_MAX_WAIT_MS) wait_ms = BENDCODER_TS_MAX_WAIT_MS;
   return wait_ms;
 }
 
@@ -111,7 +111,7 @@ static void typesafe_call_worker(IoWork* w) {
 
   int status = 0;
   int attempt;
-  for (attempt = 1; attempt <= BENDER_TS_MAX_ATTEMPTS; attempt++) {
+  for (attempt = 1; attempt <= BENDCODER_TS_MAX_ATTEMPTS; attempt++) {
     char cmd[1024];
     snprintf(cmd, sizeof(cmd),
       "curl -s -X POST https://api.typesafe.ai/v1/systemone "
@@ -130,10 +130,10 @@ static void typesafe_call_worker(IoWork* w) {
     }
     status = atoi(codebuf);
 
-    if ((status != 429 && status != 529) || attempt == BENDER_TS_MAX_ATTEMPTS) break;
+    if ((status != 429 && status != 529) || attempt == BENDCODER_TS_MAX_ATTEMPTS) break;
     long wait_ms = classify_retry_wait_ms(hdr_path, attempt - 1);
     fprintf(stderr, "[typesafe] HTTP %d; retrying in %ld ms (attempt %d of %d)\n",
-            status, wait_ms, attempt + 1, BENDER_TS_MAX_ATTEMPTS);
+            status, wait_ms, attempt + 1, BENDCODER_TS_MAX_ATTEMPTS);
     struct timespec ts = { wait_ms / 1000, (wait_ms % 1000) * 1000000L };
     nanosleep(&ts, NULL);
   }

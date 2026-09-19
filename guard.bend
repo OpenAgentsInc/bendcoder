@@ -3,9 +3,9 @@ import Base
 # ==============================================================================
 # The Path Guard
 # ==============================================================================
-# in_repo is the Bend port of path_is_in_repo (bender_agent.c) — the check
+# in_repo is the Bend port of path_is_in_repo (bendcoder_agent.c) — the check
 # that keeps a self-editing agent inside its own repository. It lives in its
-# own module so the agent loop (bender_agent.bend, via edit_anchor.bend) can
+# own module so the agent loop (bendcoder_agent.bend, via edit_anchor.bend) can
 # call the same guard the laws in LAWS.bend quantify over: the rules and the
 # implementation cannot drift apart, because there is one implementation.
 # ==============================================================================

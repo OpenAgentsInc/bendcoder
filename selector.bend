@@ -4,10 +4,10 @@ import ./action.bend as A
 import ./reads.bend as R
 
 # ==============================================================================
-# Bender Selector: the question set, the thresholds, and the answers-to-action
+# Bendcoder Selector: the question set, the thresholds, and the answers-to-action
 # table, in one reviewable module (design rules 7 and 8)
 # ==============================================================================
-# Rule 8: the questions Bender asks and the thresholds that consume them must
+# Rule 8: the questions Bendcoder asks and the thresholds that consume them must
 # review together — a threshold means nothing without the question it reads,
 # and a question nobody routes is dead weight. Both live here.
 #
@@ -35,7 +35,7 @@ import ./reads.bend as R
 # exhaustiveness earns its keep: every branch is checked, and `LoopAnswers`
 # gives each question a field that every consumer's pattern must bind — adding
 # a question and forgetting to route it is a compile error, not a dead row.
-# This was route_decision's table while the loop lived in bender_agent.c; it
+# This was route_decision's table while the loop lived in bendcoder_agent.c; it
 # is the only copy now.
 
 # ------------------------------------------------------------------------------
@@ -182,7 +182,7 @@ def under_floor(a: A.Action, +confidence: F32) -> Bool:
 
 # The flail counter's per-decision check: a Chosen answer under the general
 # floor — not the consequence-weighted one the route uses, matching
-# low_confidence_run's `conf < BENDER_CONFIDENCE_FLOOR` in bender_agent.c.
+# low_confidence_run's `conf < BENDCODER_CONFIDENCE_FLOOR` in bendcoder_agent.c.
 def low_conf(+a: P.Answer) -> Bool:
   match a:
     case P.Chosen{choice, +confidence}:
@@ -239,7 +239,7 @@ def act_is_search(+a: A.Action) -> Bool:
 # The has_enough_info noul's counterpart in this question set: progress_score
 # is a 0-2 rubric whose bottom band ("just starting / investigating") ends at
 # 1.0, so under it an answer reads as a guess — the same direction
-# BENDER_INFO_FLOOR points the C table's guard row.
+# BENDCODER_INFO_FLOOR points the C table's guard row.
 def answer_info_floor() -> F32: 1.0
 
 def progress_low(+a: P.Answer) -> Bool:
@@ -421,7 +421,7 @@ def window_options(+nlines: Nat, +page: Nat) -> List<&2, P.OptionPair>:
     [P.Opt{"none", "The code to change is not in any of these ranges"}])
 
 # A path already read to the end drops out of the read picker's options —
-# bender_agent.c's exhausted flag, here keyed on the Book's done list. The
+# bendcoder_agent.c's exhausted flag, here keyed on the Book's done list. The
 # check and the option both need the path, so it folds by hand like
 # listing_options does.
 def read_option.of(skip: Bool, +path: String, acc: List<&2, P.OptionPair>) -> List<&2, P.OptionPair>:

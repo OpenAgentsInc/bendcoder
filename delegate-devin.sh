@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Hand a GitHub issue to the Devin CLI, the same way delegate.sh hands one to
-# Bender. Same contract deliberately: clean tree in, diff and test result out,
+# Bendcoder. Same contract deliberately: clean tree in, diff and test result out,
 # so the two agents' runs are directly comparable on the same issues.
 #
 #   ./delegate-devin.sh 34

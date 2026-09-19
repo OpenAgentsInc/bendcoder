@@ -16,9 +16,9 @@ set -e
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$DIR"
 
-WORK="$(mktemp -d "${TMPDIR:-/tmp}/bender_tests_XXXXXX")"
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/bendcoder_tests_XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
-export BENDER_TEST_DIR="$WORK/scratch"
+export BENDCODER_TEST_DIR="$WORK/scratch"
 
 echo "== tools and agent helpers =="
 gcc -std=c11 -O1 -Wall -Wextra -Werror -I. test_tools.c -o "$WORK/test_tools"
@@ -31,7 +31,7 @@ gcc -std=c11 -O1 -Wall -Wextra -Werror -I. test_tools.c -o "$WORK/test_tools"
 # had never been compiled by anything at all. Checking each shim standalone
 # against a prelude declaring the runtime's side of the boundary compiles every
 # section at the same -Werror standard as the agent's own C. The prelude
-# mirrors declarations from the generated runtime (see bender_loop.c); if
+# mirrors declarations from the generated runtime (see bendcoder_loop.c); if
 # Bend's runtime ABI shifts this fails loudly, which is the check working.
 echo
 echo "== FFI shims compile, all sections =="
@@ -135,11 +135,11 @@ bend PROOF.bend >/dev/null
 echo "== tool_read.bend proves its laws =="
 bend tool_read.bend >/dev/null
 
-# bender_agent.bend uses only some of the laws sys_c.c defines, so this also
+# bendcoder_agent.bend uses only some of the laws sys_c.c defines, so this also
 # guards the #ifdef CID_* guards in sys_c.c against regressing (issue #5).
-echo "== bender_agent.bend checks and builds =="
-bend bender_agent.bend -o "$WORK/bender_loop.c" >/dev/null
-gcc -std=c11 -O1 -I. "$WORK/bender_loop.c" -lpthread -lm -o "$WORK/bender_loop_bin"
+echo "== bendcoder_agent.bend checks and builds =="
+bend bendcoder_agent.bend -o "$WORK/bendcoder_loop.c" >/dev/null
+gcc -std=c11 -O1 -I. "$WORK/bendcoder_loop.c" -lpthread -lm -o "$WORK/bendcoder_loop_bin"
 
 # call_typesafe.bend has no #| expectations — running it needs a live API key —
 # but it is still a program the repo ships, so the suite compiles it.
@@ -222,7 +222,7 @@ local_refs() {
 SEEN="$WORK/covered.txt"; : > "$SEEN"
 queue="run_tests.sh test_tools.c sys_c.c"
 queue="$queue $(grep -l '^#|' *.bend 2>/dev/null)"
-queue="$queue action.bend bender_agent.bend call_typesafe.bend PROOF.bend tool_read.bend"
+queue="$queue action.bend bendcoder_agent.bend call_typesafe.bend PROOF.bend tool_read.bend"
 queue="$queue *.sh *.md docs/*.md"
 while [ -n "$queue" ]; do
   next=""

@@ -32,8 +32,8 @@ static char* scratch_path(const char* leaf) {
 }
 
 int main(void) {
-  const char* base = getenv("BENDER_TEST_DIR");
-  snprintf(scratch, sizeof(scratch), "%s", base && base[0] ? base : "/tmp/bender_tool_test");
+  const char* base = getenv("BENDCODER_TEST_DIR");
+  snprintf(scratch, sizeof(scratch), "%s", base && base[0] ? base : "/tmp/bendcoder_tool_test");
   char rm[600];
   snprintf(rm, sizeof(rm), "rm -rf '%s'", scratch);
   if (system(rm) != 0) { /* a missing directory is fine */ }
@@ -43,8 +43,8 @@ int main(void) {
   char* w = tool_write(tmp, "one\ntwo\nthree\n", 14);
   check(strncmp(w, "File created", 12) == 0, "tool_write creates nested dirs");
   free(w);
-  check(bender_exists(tmp), "bender_exists sees the file the write just made");
-  check(!bender_exists(scratch_path("nested/nope.txt")), "bender_exists declines a missing path");
+  check(bendcoder_exists(tmp), "bendcoder_exists sees the file the write just made");
+  check(!bendcoder_exists(scratch_path("nested/nope.txt")), "bendcoder_exists declines a missing path");
   char* r = tool_read(tmp, 2, 1);
   check(r && strcmp(r, "2\ttwo") == 0, "tool_read honours 1-indexed offset+limit");
   free(r);
@@ -117,7 +117,7 @@ int main(void) {
   char* wnew = tool_write(created, "fresh\n", 6);
   check(wnew && strstr(wnew, "created") != NULL, "tool_write reports a new file as created");
   free(wnew);
-  check(unlink(created) == 0 && !bender_exists(created),
+  check(unlink(created) == 0 && !bendcoder_exists(created),
         "a created file's rollback is a remove, which sys.remove_file is for");
   free(created);
 
@@ -149,20 +149,20 @@ int main(void) {
   free(g_gap);
 
   // A miss retries case-insensitively and says so when that finds something.
-  const char* ci_text = "foo\nBender_MAX\nbar\n";
+  const char* ci_text = "foo\nBendcoder_MAX\nbar\n";
   char* w_ci = tool_write(scratch_path("ci.txt"), ci_text, strlen(ci_text));
   free(w_ci);
-  char* g_ci = tool_grep("BENDER_MAX", scratch_path("ci.txt"));
+  char* g_ci = tool_grep("BENDCODER_MAX", scratch_path("ci.txt"));
   check(g_ci && strstr(g_ci, "No matches found") != NULL &&
         strstr(g_ci, "case-insensitive") != NULL &&
-        strstr(g_ci, "2:Bender_MAX") != NULL,
+        strstr(g_ci, "2:Bendcoder_MAX") != NULL,
         "a case-only miss retries case-insensitively and reports it");
   free(g_ci);
 
   // A complete miss reports the longest pieces of the pattern that do appear,
   // so the next guess starts from something real instead of another shot in
   // the dark — the failure this exists to prevent was six identical misses.
-  const char* const_text = "#define BENDER_GREP_MAX_MATCHES 200\n";
+  const char* const_text = "#define BENDCODER_GREP_MAX_MATCHES 200\n";
   char* w_const = tool_write(scratch_path("const.h"), const_text, strlen(const_text));
   free(w_const);
   char* g_frag = tool_grep("MAX_GREP_MATCHES", scratch_path("const.h"));
@@ -201,7 +201,7 @@ int main(void) {
 
   // A tree search covers tracked files only, so generated output cannot crowd
   // out the source it was generated from.
-  char* g_tracked = tool_grep("BENDER_GREP_MAX_MATCHES", ".");
+  char* g_tracked = tool_grep("BENDCODER_GREP_MAX_MATCHES", ".");
   check(g_tracked && strstr(g_tracked, "tools_c.h:") != NULL,
         "a tree search finds tracked source");
   // A hit in an untracked file would label lines with its path; the name can
@@ -227,14 +227,14 @@ int main(void) {
   free(g5);
 
   // A very long match is clipped so one minified line cannot swamp the state.
-  char long_line[BENDER_GREP_MAX_LINE + 200];
+  char long_line[BENDCODER_GREP_MAX_LINE + 200];
   memset(long_line, 'q', sizeof(long_line) - 1);
   long_line[sizeof(long_line) - 1] = '\0';
   memcpy(long_line, "needle", 6);
   char* w3 = tool_write(scratch_path("long.txt"), long_line, strlen(long_line));
   free(w3);
   char* g6 = tool_grep("needle", scratch_path("long.txt"));
-  check(g6 && strlen(g6) < BENDER_GREP_MAX_LINE + 64, "tool_grep clips an over-long line");
+  check(g6 && strlen(g6) < BENDCODER_GREP_MAX_LINE + 64, "tool_grep clips an over-long line");
   check(g6 && strstr(g6, "...") != NULL, "tool_grep marks a clipped line");
   free(g6);
 

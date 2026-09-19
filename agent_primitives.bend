@@ -2,9 +2,9 @@ import Base
 import ./tool_read.bend as T
 
 # ==============================================================================
-# Bender Agent Core: Classify & Generate
+# Bendcoder Agent Core: Classify & Generate
 # ==============================================================================
-# In Bender, the agent loop is simplified to two core primitives:
+# In Bendcoder, the agent loop is simplified to two core primitives:
 # 1. Classify: Fast, calibrated decision making using TypeSafe System One.
 #              Given the agent's current state (context, errors, code, instructions)
 #              and structured questions (Choice, Score, Noul), Classify yields
@@ -78,7 +78,7 @@ law sys.grep_file:
 def sys.grep_file(pattern, path):
   import "./sys_c.c"
 
-# "true" or "false" — the blind-edit guard's bender_exists, asked before an
+# "true" or "false" — the blind-edit guard's bendcoder_exists, asked before an
 # edit to a file never read is refused.
 law sys.exists:
   String -> IO(String)
@@ -217,7 +217,7 @@ type State is Data:
 
 # The budget the rendered observations must fit, standing where the C
 # buffer's 32768 did, and the per-entry clip standing where
-# BENDER_MAX_TOOL_OUTPUT did. Written as products rather than literals: a Nat
+# BENDCODER_MAX_TOOL_OUTPUT did. Written as products rather than literals: a Nat
 # is unary, so 32768n expands to that many constructors at check time and
 # overflows the machine stack.
 def state_budget() -> Nat: Nat.mul(256n, 128n)
@@ -332,7 +332,7 @@ def state_listing(s: State) -> String:
       String.join(paths, "\n")
 
 # Whether the program already ran the named action — the final_answer flag
-# bender_agent.c keeps beside its state, which the end-of-fuel answer force
+# bendcoder_agent.c keeps beside its state, which the end-of-fuel answer force
 # tests before overriding the route.
 def state_did(s: State, +name: String) -> Bool:
   match s:

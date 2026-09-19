@@ -1,6 +1,6 @@
-# What Bend buys Bender
+# What Bend buys Bendcoder
 
-A study of the Bend2 language (`~/bend`, Bend 2.0.5) against Bender's current
+A study of the Bend2 language (`~/bend`, Bend 2.0.5) against Bendcoder's current
 implementation, aimed at one question: **what does Bend give an autonomous
 coding agent that C does not?**
 
@@ -39,7 +39,7 @@ This study was originally written to answer "which parts of an agent are made
 materially safer by moving them to Bend". That question has since been settled
 in a stronger form, and the ranking below should be read accordingly.
 
-**Bender targets Bend deliberately, and Bend's strictness is the feature.** Bend
+**Bendcoder targets Bend deliberately, and Bend's strictness is the feature.** Bend
 is a new language that is not in model training data; the fact that an LLM finds
 it hard to write is accepted, and wanted, because it is what stops unverified
 code accumulating. The goal is not to ship a coding agent by the fastest route.
@@ -59,8 +59,8 @@ Three consequences for everything below:
    all — a law proved over every input is the goal, not a handful of examples in
    `test_tools.c`.
 
-The practical target this implies: `bender_agent.bend` becomes the agent, and
-`bender_agent.c` shrinks towards being the FFI shim that `sys_c.c` and
+The practical target this implies: `bendcoder_agent.bend` becomes the agent, and
+`bendcoder_agent.c` shrinks towards being the FFI shim that `sys_c.c` and
 `tools_c.h` already are. Today it is the other way around — 2,143 lines of C to
 487 of Bend, and the C loop is the one that runs.
 
@@ -68,23 +68,23 @@ The practical target this implies: `bender_agent.bend` becomes the agent, and
 
 ## 1. Ranked summary
 
-Value-to-effort, best first. "One-edit" means Bender could plausibly do it to
+Value-to-effort, best first. "One-edit" means Bendcoder could plausibly do it to
 itself in a single `<<<OLD>>>`/`<<<NEW>>>` hunk verified by `./run_tests.sh`.
 
 | # | Recommendation | Touches | Effort | One-edit? |
 |---|---|---|---|---|
-| 1 | [Typed action space (`type Action`)](#r1) — kill the `strcmp` chain | `bender_agent.bend` | small | ✅ best first |
+| 1 | [Typed action space (`type Action`)](#r1) — kill the `strcmp` chain | `bendcoder_agent.bend` | small | ✅ best first |
 | 2 | [`Exec` returns an exit status](#r2) — the Bend loop currently cannot tell pass from fail | `sys_c.c`, `agent_primitives.bend` | small | ✅ |
 | 3 | [`LAWS.bend` + `PROOF.bend` gate](#r3) — make `run_tests.sh` a proof gate | new files, `run_tests.sh` | small | ✅ (2 edits) |
-| 4 | [Typed tool results (`type Edit`, `type ToolResult`)](#r4) — no more nullable `char*` triples | new `bender_parse.bend` | small | ✅ |
-| 5 | [Move the sentinel parser + path guard into Bend](#r5) — and prove the guard | new `bender_parse.bend`, `bender_agent.bend` | medium | ✅ |
-| 6 | [Bend-side `apply_edit` with verify + rollback](#r6) — the self-improvement loop, total | `bender_agent.bend` | medium | after #2 |
-| 7 | [De-duplicate the three JSON escapers in C](#r7) | `bender_agent.c` | small | ✅ |
-| 8 | [Parallel `Classify` / multi-file read via `IO.fork`](#r8) — measured 3× | `bender_agent.bend` | medium | ✅ |
+| 4 | [Typed tool results (`type Edit`, `type ToolResult`)](#r4) — no more nullable `char*` triples | new `bendcoder_parse.bend` | small | ✅ |
+| 5 | [Move the sentinel parser + path guard into Bend](#r5) — and prove the guard | new `bendcoder_parse.bend`, `bendcoder_agent.bend` | medium | ✅ |
+| 6 | [Bend-side `apply_edit` with verify + rollback](#r6) — the self-improvement loop, total | `bendcoder_agent.bend` | medium | after #2 |
+| 7 | [De-duplicate the three JSON escapers in C](#r7) | `bendcoder_agent.c` | small | ✅ |
+| 8 | [Parallel `Classify` / multi-file read via `IO.fork`](#r8) — measured 3× | `bendcoder_agent.bend` | medium | ✅ |
 | 9 | [Adopt Bend's `#|` expected-output test convention](#r9) | every `.bend` file, `run_tests.sh` | small | ✅ |
-| 10 | [Transcript as `List<Step>`, not a string blob](#r10) | new `bender_state.bend` | medium | partly |
+| 10 | [Transcript as `List<Step>`, not a string blob](#r10) | new `bendcoder_state.bend` | medium | partly |
 | 11 | [Split the agent into modules](#r11) | several | small | ✅ |
-| 12 | [Stop re-implementing Base](#r12) — `String.trim`, `split`, `lines`, `contains`, `Map` | `bender_parse.bend` | small | ✅ |
+| 12 | [Stop re-implementing Base](#r12) — `String.trim`, `split`, `lines`, `contains`, `Map` | `bendcoder_parse.bend` | small | ✅ |
 | 13 | [Split `tool_read`: line selection and rendering move to Bend with laws](#not-worth-doing) — revised under §0.5 | `tools_c.h`, new Bend module | medium | no |
 | — | [**Can't**: HTTPS, subprocess, `stat`, directory walking — Bend has no primitive](#not-worth-doing) | — | — | — |
 | — | [**Don't**: arrays for agent state, GPU `!` — genuinely wrong tool, not merely harder](#not-worth-doing) | — | — | — |
@@ -109,8 +109,8 @@ Bend 2.0.5 actually says, plus two more you did not list.
 
 - **There is no `argv`.** Base has `IO.get_env` (`bend2/base.bend:186`) and
   nothing else; `bend2/effs/` contains `get_env.c` but no `args.c`. A Bend
-  Bender cannot read `argv[1]` the way `bender_agent.c:569` does. Its goal must
-  arrive as `BENDER_GOAL` in the environment. This is a real architectural
+  Bendcoder cannot read `argv[1]` the way `bendcoder_agent.c:569` does. Its goal must
+  arrive as `BENDCODER_GOAL` in the environment. This is a real architectural
   constraint on moving the loop to Bend.
 - **Constructors of an imported type must be qualified.** In a file that does
   `import ./action.bend as A`, `case ReadCode{}:` fails with
@@ -122,7 +122,7 @@ Bend 2.0.5 actually says, plus two more you did not list.
 The constraint is real but the guide's framing is different and more useful:
 mutual recursion is banned *because* termination must be checked
 (`GUIDE.md:114-118`). The no-forward-reference rule is the *mechanism*. The
-practical consequence is the one `bender_agent.bend:67-70` already records: the
+practical consequence is the one `bendcoder_agent.bend:67-70` already records: the
 loop is one self-recursive `agent_step`, helpers are defined above it and return
 values rather than calling back. Every recommendation below respects that.
 
@@ -134,7 +134,7 @@ values rather than calling back. Every recommendation below respects that.
 
 This is the single biggest difference, and it is not theoretical.
 
-`bender_agent.c:588` runs `for (int step = 1; step <= max_steps; step++)`. That
+`bendcoder_agent.c:588` runs `for (int step = 1; step <= max_steps; step++)`. That
 bound is a convention: any future edit that turns it into a `while (!done)` — a
 very natural thing for a model to write — compiles fine and can hang forever. An
 autonomous agent that edits its own loop is exactly the program where that
@@ -151,18 +151,18 @@ def step(+state: String) -> IO(Unit):
 
 > `expected : a decreasing self-call (arguments are read left to right: each passed unchanged until one shrinks)`
 
-`bender_agent.bend:169` already pays this tax (`fuel: Nat` leads the parameter
-list) and gets the guarantee in exchange. **Bender's C loop has no such
+`bendcoder_agent.bend:169` already pays this tax (`fuel: Nat` leads the parameter
+list) and gets the guarantee in exchange. **Bendcoder's C loop has no such
 guarantee and no way to acquire one.**
 
 The escape hatch is `@unsafe` (`GUIDE.md:116`), and it is not merely
 theoretical: Bend's own HTTP server marks its accept loop `@unsafe`
 (`/home/christopherdavid/bend/demos/io_http_server/main.bend:41-46`), because a
 server genuinely runs forever. So the rule to adopt is not "never `@unsafe`" but
-the sharper one: **Bender's agent loop stays fuel-bounded and total; `@unsafe`
+the sharper one: **Bendcoder's agent loop stays fuel-bounded and total; `@unsafe`
 appears nowhere in the repo**, and `run_tests.sh` can enforce that with a
-`grep`. A fuel bound is the honest model of an agent anyway — `BENDER_MAX_STEPS`
-(`bender_agent.c:482-487`) already is one, just unchecked.
+`grep`. A fuel bound is the honest model of an agent anyway — `BENDCODER_MAX_STEPS`
+(`bendcoder_agent.c:482-487`) already is one, just unchecked.
 
 Worth knowing that Bend's test suite anticipates the failure mode: the file
 `/home/christopherdavid/bend/tests/halt/swapped_induction.bend:1` is labelled
@@ -174,11 +174,11 @@ is about to write a Bend loop.
 ### 3.2 Illegal agent states become unrepresentable
 
 Today the agent's decision is a `char*` compared with `strcmp`
-(`bender_agent.c:524-541`). Three separate things can go wrong and none is
+(`bendcoder_agent.c:524-541`). Three separate things can go wrong and none is
 caught by a compiler: a typo in a criterion name in the JSON payload
-(`bender_agent.c:107-111`) silently falls through to the `else` branch; adding a
+(`bendcoder_agent.c:107-111`) silently falls through to the `else` branch; adding a
 sixth action means remembering to add a branch; and the parsed edit is three
-independent `char*`s that may each be `NULL` (`bender_agent.c:403-414`).
+independent `char*`s that may each be `NULL` (`bendcoder_agent.c:403-414`).
 
 Bend turns all three into compile errors. I confirmed exhaustiveness is
 enforced: deleting one `case` from a five-constructor match gives
@@ -200,7 +200,7 @@ fine (`tests/check/linear_binder_discard.bend:1-9`), so there is no
 ### 3.3 The agent can prove things about itself
 
 This is the capability with no C analogue at all, and it works *today*. I wrote
-Bender's path guard in Bend, stated three laws about it, and Bend proved them —
+Bendcoder's path guard in Bend, stated three laws about it, and Bend proved them —
 in 0.14 s:
 
 ```python
@@ -253,14 +253,14 @@ Output: `All terms check.`
 
 Two of the three proofs are literally `{==}` — Bend computes the guard on the
 symbolic input and sees `False{}` come out. The third needed one four-line
-lemma. **This is a proof that Bender's sandbox escape guard cannot be broken by
+lemma. **This is a proof that Bendcoder's sandbox escape guard cannot be broken by
 a whole class of input, and it is re-checked on every build.** `test_tools.c:51-55`
 tests five example paths; the law covers all of them and every other path too.
 
 The honest boundary: `IO` is opaque, so you cannot prove "the file on disk is
 unchanged". You prove the *pure* part. That is exactly how the Bend repo does
 it — `demos/io_http_fetch/LAWS.bend:1-3` says so in as many words: "They pin
-`http_body`, its pure part". Bender's pure parts are the path guard, the edit
+`http_body`, its pure part". Bendcoder's pure parts are the path guard, the edit
 parser, the action decoder, and the state-clipping rule. All four are where the
 bugs actually are.
 
@@ -287,7 +287,7 @@ done:a done:b done:c
 real    0m1.134s
 ```
 
-Three seconds of latency in 1.13 s of wall clock. Bender's loop is
+Three seconds of latency in 1.13 s of wall clock. Bendcoder's loop is
 latency-dominated — one TypeSafe call plus one OpenRouter call per step, both
 over the network, serialized today. That is the parallelism worth having, and it
 is `IO.fork`, not `!`.
@@ -304,12 +304,12 @@ is `IO.fork`, not `!`.
 **What.** Make the agent's five actions a datatype, decode the classifier's
 string into it once, and dispatch by `match`.
 
-**Why Bend beats the status quo.** `bender_agent.c:524-541` is an if/else-if
+**Why Bend beats the status quo.** `bendcoder_agent.c:524-541` is an if/else-if
 chain over `strcmp` with an implicit `else` meaning "generate_answer". Nothing
 connects it to the criteria list in the JSON payload at
-`bender_agent.c:107-111`. `bender_agent.bend:137-150` is worse — a
+`bendcoder_agent.c:107-111`. `bendcoder_agent.bend:137-150` is worse — a
 four-`Bool`-parameter cascade whose argument order at the call site
-(`bender_agent.bend:158-161`) silently encodes the priority. With a datatype the
+(`bendcoder_agent.bend:158-161`) silently encodes the priority. With a datatype the
 compiler enforces that every action is handled, and adding one is a compile
 error until it is.
 
@@ -370,8 +370,8 @@ def action_roundtrip(a):
     case A.TaskComplete{}:   {==}
 ```
 
-**Files.** `bender_agent.bend` (replacing `dispatch_action` at :137 and
-`run_action` at :153). Later, `bender_agent.c:524-541` follows.
+**Files.** `bendcoder_agent.bend` (replacing `dispatch_action` at :137 and
+`run_action` at :153). Later, `bendcoder_agent.c:524-541` follows.
 
 ---
 
@@ -382,8 +382,8 @@ def action_roundtrip(a):
 
 **What.** `command.run` (`sys_c.c:34-89`) returns combined stdout+stderr and
 throws the exit code away. `Exec` (`agent_primitives.bend:179`) inherits that.
-The C runtime has `exec_cmd_status` (`bender_agent.c:32`) and *uses* the status
-to decide whether to roll an edit back (`bender_agent.c:446`). **The Bend side
+The C runtime has `exec_cmd_status` (`bendcoder_agent.c:32`) and *uses* the status
+to decide whether to roll an edit back (`bendcoder_agent.c:446`). **The Bend side
 has no way to make that decision.** Any Bend port of the self-improvement loop
 is blocked on this.
 
@@ -427,7 +427,7 @@ proofs; `bend PROOF.bend` is the gate. Add one line to `run_tests.sh`.
 
 **Why Bend.** This is the feature with no C equivalent whatsoever, and it is the
 missing half of the self-improvement loop. Right now `run_tests.sh` is the only
-thing standing between Bender and a bad self-edit, and it checks *examples*. A
+thing standing between Bendcoder and a bad self-edit, and it checks *examples*. A
 law checks *all inputs*. The Bend README puts it well: `LAWS.bend` is
 `AGENTS.md` backed by proof (`/home/christopherdavid/bend/README.md:96`).
 
@@ -437,14 +437,14 @@ escape its sandbox or corrupt its own repo:
 ```python
 # LAWS.bend
 import Base
-import ./bender_parse.bend as B
+import ./bendcoder_parse.bend as B
 
-# LAW: Bender never touches an absolute path.
+# LAW: Bendcoder never touches an absolute path.
 law no_absolute:
   for rest: String
   {B.path_ok(SCon{Chr{47}, rest}) == False{} : Bool}
 
-# LAW: Bender never climbs out of the repository.
+# LAW: Bendcoder never climbs out of the repository.
 law no_dotdot_prefix:
   for rest: String
   {B.path_ok(SCon{Chr{46}, SCon{Chr{46}, rest}}) == False{} : Bool}
@@ -467,7 +467,7 @@ bend PROOF.bend
 
 All four of these are proved above, so the gate goes green on day one. Total
 cost: about 30 lines. **Then tell the model in `EDIT_FORMAT_SYSTEM`
-(`bender_agent.c:308-319`) that `LAWS.bend` is off limits.**
+(`bendcoder_agent.c:308-319`) that `LAWS.bend` is off limits.**
 
 **Law forms worth knowing when you write the next ones.** A law may bind
 intermediate values with a `let`, which makes agent-shaped claims readable —
@@ -481,7 +481,7 @@ law you_cant_win:
   {Game.is_won(board) == False{} : Bool}
 ```
 
-The direct analogue for Bender — *"no sequence of parsed edits ever names a path
+The direct analogue for Bendcoder — *"no sequence of parsed edits ever names a path
 outside the repo"* — is the law worth aiming at once R5 and R10 land. A law may
 also demand a witness with `exs`
 (`/home/christopherdavid/bend/evals/firm.looper_cancellation.bend:56-59`) or a
@@ -494,7 +494,7 @@ def add_successor(+n: Nat, +m: Nat) -> {Nat.add(n, 1n+m) == 1n+Nat.add(n, m) : N
 ```
 
 **Files.** New `LAWS.bend`, new `PROOF.bend`, `run_tests.sh`,
-`bender_agent.c` (the system prompt).
+`bendcoder_agent.c` (the system prompt).
 
 **Depends on** R5 (the guard must be in Bend to be provable). A two-edit
 sequence: R5 then R3.
@@ -507,7 +507,7 @@ sequence: R5 then R3.
 **Effort: small.**
 
 **What.** `do_apply_edit` slices three sections and then checks
-`if (!path || !old_str || !new_str)` (`bender_agent.c:403-414`). Seven states
+`if (!path || !old_str || !new_str)` (`bendcoder_agent.c:403-414`). Seven states
 are representable; three are meaningful. Model it:
 
 ```python
@@ -529,9 +529,9 @@ a path that passed `path_ok`, because the only function that builds one runs the
 guard. In C the guard is a separate `if` that a future edit can drop. And the
 `match` on `Edit` is exhaustive, so "I forgot the refused case" is a compile
 error. This also replaces the `strncmp(result, "error:", 6)` convention at
-`bender_agent.c:432`, which is string-typing a boolean.
+`bendcoder_agent.c:432`, which is string-typing a boolean.
 
-**Files.** New `bender_parse.bend`; consumed by `bender_agent.bend`.
+**Files.** New `bendcoder_parse.bend`; consumed by `bendcoder_agent.bend`.
 
 ---
 
@@ -540,8 +540,8 @@ error. This also replaces the `strncmp(result, "error:", 6)` convention at
 
 **Effort: medium. Verified working.**
 
-**What.** `slice_section` (`bender_agent.c:324`), `trim_inplace`
-(`bender_agent.c:342`) and `path_is_in_repo` (`bender_agent.c:298`) are pure
+**What.** `slice_section` (`bendcoder_agent.c:324`), `trim_inplace`
+(`bendcoder_agent.c:342`) and `path_is_in_repo` (`bendcoder_agent.c:298`) are pure
 string functions with no IO. They are the parts most likely to be wrong and the
 only parts that can be proved. Move them.
 
@@ -600,11 +600,11 @@ the match field and `+s` on the parameter; without them Bend rejects with
 `consumed more than once`. The `here: Bool` parameter exists only because a
 `match` cannot scrutinize `String.starts_with(t, pat)` directly — the caller
 computes it and passes it down. That is the same workaround
-`bender_agent.bend:135-136` already documents, and it is exactly how Base itself
+`bendcoder_agent.bend:135-136` already documents, and it is exactly how Base itself
 is written (`bend2/base.bend:1787` `String.starts_with.if`,
 `bend2/base.bend:1813` `String.contains.if`). It is idiomatic, not a hack.
 
-**Files.** New `bender_parse.bend`; delete the C twins from `bender_agent.c`
+**Files.** New `bendcoder_parse.bend`; delete the C twins from `bendcoder_agent.c`
 once the Bend loop is the real one.
 
 ---
@@ -615,7 +615,7 @@ once the Bend loop is the real one.
 **Effort: medium. Depends on R2.**
 
 **What.** Port the loop's centrepiece — `do_apply_edit`
-(`bender_agent.c:500-567`) — to Bend. **I verified this compiles and links
+(`bendcoder_agent.c:500-567`) — to Bend. **I verified this compiles and links
 against the existing FFI today:**
 
 ```python
@@ -654,7 +654,7 @@ with eight `free` calls on five paths. In Bend the snapshot is an affine value:
 it is either written back or dropped, and there is no third option. The
 `keep_or_rollback` match is exhaustive.
 
-**Files.** `bender_agent.bend`.
+**Files.** `bendcoder_agent.bend`.
 
 ---
 
@@ -663,10 +663,10 @@ it is either written back or dropped, and there is no third option. The
 
 **Effort: small. A pure-C cleanup and a very good first self-edit.**
 
-`bender_agent.c` contains the *same* seven-line escape loop three times — at
+`bendcoder_agent.c` contains the *same* seven-line escape loop three times — at
 :96-103, :154-161 and :164-171. Meanwhile `agent_primitives.bend:69-89` has a
 correct `json_escape` in Bend, and `json_parse_c.c:7-25,28-50` duplicates
-`extract_choice` and `extract_content` (`bender_agent.c:198,217`) a fourth and
+`extract_choice` and `extract_content` (`bendcoder_agent.c:198,217`) a fourth and
 fifth time.
 
 There is no Bend insight here — it is just duplication, and it is the kind of
@@ -675,9 +675,9 @@ duplication that makes an agent's self-edits diverge. Factor one
 
 The Bend-flavoured version of this recommendation: **the C runtime and the Bend
 runtime should not each own a parser.** Long term, `json_parse_c.c` is the only
-copy and `bender_agent.c` calls it.
+copy and `bendcoder_agent.c` calls it.
 
-**Files.** `bender_agent.c`.
+**Files.** `bendcoder_agent.c`.
 
 ---
 
@@ -695,7 +695,7 @@ The guide's claim is that a parallel call's independence "always holds" because
 Bend is pure and affine (`GUIDE.md:132-134`). The same reasoning covers forked
 `IO`: two forked computations cannot share a mutable buffer because there are no
 mutable buffers. Doing this in C means threads, and threads around
-`state_append` writing into one `char state[32768]` (`bender_agent.c:271`) is
+`state_append` writing into one `char state[32768]` (`bendcoder_agent.c:271`) is
 exactly the bug you do not want in an agent that edits itself.
 
 **Measured**, three forks of a 1000 ms effect:
@@ -733,7 +733,7 @@ law tree_is_seq:
 
 proved in 41 lines (`demos/pure_par_sum/PROOF.bend:33-41`). **This is the single
 best idiom in the Bend repo for an autonomous agent: parallelize aggressively,
-then prove the fast version equals the obvious one.** For Bender the analogue is
+then prove the fast version equals the obvious one.** For Bendcoder the analogue is
 "a parallel multi-read returns the same transcript as reading the files one at a
 time" — a law that is cheap to state and forecloses the entire class of
 concurrency bug that would otherwise make parallelism too risky for a
@@ -745,7 +745,7 @@ generation depends on the classification. The wins are: multi-file reads, and
 issuing the next step's `Classify` speculatively while a long verify runs. Start
 with reads.
 
-**Files.** `bender_agent.bend`.
+**Files.** `bendcoder_agent.bend`.
 
 ---
 
@@ -764,17 +764,17 @@ equivalent is below.) Value tests
 full message including line numbers and `exit 1`
 (`tests/check/operator_chain_linear.bend:19-26`).
 
-**Why this matters for Bender specifically.** Right now Bender's only test
+**Why this matters for Bendcoder specifically.** Right now Bendcoder's only test
 artifact is `test_tools.c`, a 70-line C harness that must be *edited in a second
 place* every time a behaviour changes — a two-file edit, which is exactly what a
 single-hunk self-edit cannot do. With the `#|` convention, a new Bend module
 carries its own expectations inline, and `run_tests.sh` just runs `bend` over
 every `.bend` file. **A self-editing agent can then add a function and its test
-in one hunk.** That is a direct, large improvement to Bender's ability to edit
+in one hunk.** That is a direct, large improvement to Bendcoder's ability to edit
 itself safely.
 
 ```python
-# bender_parse.bend
+# bendcoder_parse.bend
 def main() -> IO(Unit):
   do IO<Unit>:
     IO.print(section("<<<PATH>>>\nsys_c.c\n<<<OLD>>>\n", "<<<PATH>>>", "<<<OLD>>>"))
@@ -797,7 +797,7 @@ done
 
 A file with no `#|` lines is merely type-checked, so this also closes the gap
 noted at the end of §7: **every** `.bend` file gets checked, not just the two
-reachable from `bender_agent.bend`.
+reachable from `bendcoder_agent.bend`.
 
 **Files.** every `.bend` file, `run_tests.sh`.
 
@@ -808,10 +808,10 @@ reachable from `bender_agent.bend`.
 
 **Effort: medium.**
 
-**What.** The agent's memory is `char state[32768]` (`bender_agent.c:571`) with
+**What.** The agent's memory is `char state[32768]` (`bendcoder_agent.c:571`) with
 `state_append` silently clipping at 6000 bytes per entry
-(`bender_agent.c:268-283`) and silently doing nothing at all once the buffer is
-nearly full (`bender_agent.c:273`: `if (used + 64 >= cap) return;`). **That is a
+(`bendcoder_agent.c:268-283`) and silently doing nothing at all once the buffer is
+nearly full (`bendcoder_agent.c:273`: `if (used + 64 >= cap) return;`). **That is a
 silent amnesia bug**: past a certain point the agent stops recording what it
 did and cannot tell.
 
@@ -838,7 +838,7 @@ solved twice in the Bend repo**:
   `undo`/`redo` round-trip — both halves by a single induction returning a pair,
   then split by `undo_redo.fst` / `undo_redo.snd`.
 
-Bender's edit history with rollback is the same structure, and "rolling back an
+Bendcoder's edit history with rollback is the same structure, and "rolling back an
 applied edit restores the previous transcript" is the same law. Read both files
 before writing this.
 
@@ -849,7 +849,7 @@ microseconds and irrelevant — but do not build a transcript by repeated `++` i
 a hot loop; use `String.concat` / `String.join` (`bend2/base.bend:1868,1882`)
 over a list at render time.
 
-**Files.** New `bender_state.bend`.
+**Files.** New `bendcoder_state.bend`.
 
 ---
 
@@ -859,14 +859,14 @@ over a list at render time.
 **Effort: small.**
 
 Bend's module system is a plain file-with-an-alias (`GUIDE.md:301-318`) and it
-works — `bender_agent.bend:2` already uses it. The natural split:
+works — `bendcoder_agent.bend:2` already uses it. The natural split:
 
 ```
 agent_primitives.bend   FFI laws + Classify/Generate + tools      (exists)
-bender_parse.bend       path guard, sentinel parser, Action, Edit  (R1/R4/R5)
-bender_state.bend       Step, Transcript, rendering                (R10)
-bender_ui.bend          the ANSI helpers now at bender_agent.bend:36-61
-bender_agent.bend       the loop, and nothing else
+bendcoder_parse.bend       path guard, sentinel parser, Action, Edit  (R1/R4/R5)
+bendcoder_state.bend       Step, Transcript, rendering                (R10)
+bendcoder_ui.bend          the ANSI helpers now at bendcoder_agent.bend:36-61
+bendcoder_agent.bend       the loop, and nothing else
 LAWS.bend / PROOF.bend  the gate                                   (R3)
 ```
 
@@ -875,7 +875,7 @@ reference rule means a single file is a strict topological order, and every new
 helper must be inserted *above* its first use. That is a nasty constraint for a
 model producing one-hunk edits: it has to find the right insertion point, not
 just append. Small modules make "append to the end of the right file" correct
-far more often. **This is a direct ergonomics win for Bender's own edit loop.**
+far more often. **This is a direct ergonomics win for Bendcoder's own edit loop.**
 
 One caveat found the hard way: constructors of an imported type need the module
 prefix in patterns (`case A.ReadCode{}:`).
@@ -887,20 +887,20 @@ prefix in patterns (`case A.ReadCode{}:`).
 
 **Effort: small; mostly a matter of knowing what is there.**
 
-Bender's C has hand-written versions of things Base already provides. When the
+Bendcoder's C has hand-written versions of things Base already provides. When the
 parsing moves to Bend (R5), use these rather than porting the C:
 
-| Bender's C | Use instead | Base |
+| Bendcoder's C | Use instead | Base |
 |---|---|---|
-| `trim_inplace` (`bender_agent.c:342`) | `String.trim` / `trim_start` / `trim_end` | `bend2/base.bend:1956,1946,1953` |
-| `bender_count_matches` (`tools_c.h:100`) | `String.contains` | `bend2/base.bend:1820` |
+| `trim_inplace` (`bendcoder_agent.c:342`) | `String.trim` / `trim_start` / `trim_end` | `bend2/base.bend:1956,1946,1953` |
+| `bendcoder_count_matches` (`tools_c.h:100`) | `String.contains` | `bend2/base.bend:1820` |
 | line splitting in `tool_read` (`tools_c.h:219-241`) | `String.lines` | `bend2/base.bend:1911` |
 | ad-hoc `strstr`-prefix checks | `String.starts_with` / `ends_with` | `bend2/base.bend:1794,1805` |
 | number formatting via `snprintf` | `U32.show` / `Nat.show` / `U32.read` | `bend2/base.bend:2054,1987,2078` |
-| `read_cursors[]` fixed array (`bender_agent.c:395`) | `Map` (string-keyed patricia trie) | `bend2/base.bend:2341-2689` |
+| `read_cursors[]` fixed array (`bendcoder_agent.c:395`) | `Map` (string-keyed patricia trie) | `bend2/base.bend:2341-2689` |
 | the three escape loops (R7) | `json_escape` — **already written in Bend** | `agent_primitives.bend:69-89` |
 
-The `read_cursors` one is worth calling out: `bender_agent.c:395` is a
+The `read_cursors` one is worth calling out: `bendcoder_agent.c:395` is a
 fixed-size array of per-file read positions with a linear scan. `Map.set` /
 `Map.get` (`bend2/base.bend:2491,2553`) is the same thing, unbounded and
 already written. Note Base's `Map` threads itself back out of a lookup —
@@ -922,7 +922,7 @@ Being specific about where C wins matters as much as the recommendations.
 (`bend2/base.bend:67`, `GUIDE.md:154-167`) is a complete binary tree with
 `Array.swap` (`bend2/base.bend:2171`) as the primitive; every read threads the
 array back out because it is `Type`-kinded. It is designed for `2^d`-slot
-numeric workloads. Bender's state is a few KB of text rewritten wholesale once
+numeric workloads. Bendcoder's state is a few KB of text rewritten wholesale once
 per step — there is no hot indexed update anywhere in the agent. This would be
 pure ceremony. **Don't.**
 
@@ -939,8 +939,8 @@ should stay.**
 
 **Subprocess execution, `mkdir -p`, `stat`, directory listing.** Base has none
 of these — `bend2/effs/` has 35 primitives and not one of them spawns a process
-or touches directory metadata. `tools_c.h`'s `bender_mkdir_parents` (:85) and
-`bender_is_dir` (:72) have no Bend equivalent and are correct as C. **Keep.**
+or touches directory metadata. `tools_c.h`'s `bendcoder_mkdir_parents` (:85) and
+`bendcoder_is_dir` (:72) have no Bend equivalent and are correct as C. **Keep.**
 
 **Porting `tool_read`'s line-numbering algorithm to Bend.** *Revised under §0.5.*
 The original argument was that rewriting it "buys no provable property", which
@@ -951,7 +951,7 @@ string, and it is exactly the piece that produced the `N<tab>` prefix bug in #7.
 Properties worth stating about it: that the rendered line count equals
 `min(limit, total - offset + 1)`, and that stripping the rendered prefixes
 returns the selected lines unchanged, which is the round-trip Edit's fallback
-depends on. **Split it**: `bender_slurp` stays in C because file IO must; the
+depends on. **Split it**: `bendcoder_slurp` stays in C because file IO must; the
 line selection and rendering move to Bend with laws. Only the BOM strip and the
 size cap are genuinely IO-adjacent.
 
@@ -966,12 +966,12 @@ use (`demos/io_http_fetch/LAWS.bend:1-3`).
 
 Honest blockers, in the order they will bite.
 
-1. **No `argv`.** `bender_agent.c:569` takes the goal from `argv[1]`. A Bend
-   agent must use `IO.get_env` (`bend2/base.bend:186`) — `BENDER_GOAL` — and
-   `run_bender.sh` has to set it. There is no workaround short of a new FFI
+1. **No `argv`.** `bendcoder_agent.c:569` takes the goal from `argv[1]`. A Bend
+   agent must use `IO.get_env` (`bend2/base.bend:186`) — `BENDCODER_GOAL` — and
+   `run_bendcoder.sh` has to set it. There is no workaround short of a new FFI
    effect.
 2. **No forward references** forces the whole agent into one topological order.
-   Mitigated by R10, but it will keep shaping every edit Bender makes to itself.
+   Mitigated by R10, but it will keep shaping every edit Bendcoder makes to itself.
    It also means a new helper can never be appended to the end of a file that
    uses it — the most natural single-hunk edit a model produces.
 3. **No exit status from `Exec`** (R2). Blocks a faithful Bend port of the
@@ -996,31 +996,31 @@ Honest blockers, in the order they will bite.
 
 ---
 
-## 7. A concrete sequence for Bender to do to itself
+## 7. A concrete sequence for Bendcoder to do to itself
 
 Each step is one file, one hunk where possible, verified by `./run_tests.sh` as
-it stands (which already checks `bender_agent.bend`, and transitively
+it stands (which already checks `bendcoder_agent.bend`, and transitively
 `agent_primitives.bend`, at `run_tests.sh:21-23`).
 
 | Step | Edit | Verified by |
 |---|---|---|
-| 1 | Add `type Action` + `parse_action` + `show_action` to `bender_agent.bend` above `dispatch_action` (R1) | existing `run_tests.sh` |
+| 1 | Add `type Action` + `parse_action` + `show_action` to `bendcoder_agent.bend` above `dispatch_action` (R1) | existing `run_tests.sh` |
 | 2 | Rewrite `dispatch_action`/`run_action` to `match` on `Action` (R1) | existing |
-| 3 | Factor the three duplicate escape loops in `bender_agent.c` into one helper (R7) | existing (`-fsyntax-only` + `test_tools.c`) |
+| 3 | Factor the three duplicate escape loops in `bendcoder_agent.c` into one helper (R7) | existing (`-fsyntax-only` + `test_tools.c`) |
 | 4 | Replace `run_tests.sh`'s two hard-coded `bend` invocations with the `#|` loop (R9) | itself |
-| 5 | Create `bender_parse.bend` with `path_ok`, `after`, `before`, `section` and its `#|` expectations (R5) | the loop from step 4 |
+| 5 | Create `bendcoder_parse.bend` with `path_ok`, `after`, `before`, `section` and its `#|` expectations (R5) | the loop from step 4 |
 | 6 | Create `LAWS.bend` + `PROOF.bend` with the four proved laws; add `bend PROOF.bend` to `run_tests.sh` (R3) | the new gate |
 | 7 | Add `command.run_status` to `sys_c.c` with its `#ifdef` guard, and `Exec2` to `agent_primitives.bend` (R2) | existing |
-| 8 | Add `apply_edit` to `bender_agent.bend` using `Exec2` (R6) | existing |
+| 8 | Add `apply_edit` to `bendcoder_agent.bend` using `Exec2` (R6) | existing |
 | 9 | Parallel reads via `IO.fork`, plus the equivalence law (R8) | the gate |
 
 Steps 1–3 are the safest first candidates: single file, single hunk, no new
 files, no changes to `run_tests.sh`. **Step 1 is the one to try first.**
 
-**Step 4 is the keystone and is worth doing by hand before turning Bender
+**Step 4 is the keystone and is worth doing by hand before turning Bendcoder
 loose.** Until `run_tests.sh` checks *every* `.bend` file rather than the two
-reachable from `bender_agent.bend` (`run_tests.sh:21-23`), any new Bend module
-Bender creates is invisible to its own verifier — and an unverified file is
+reachable from `bendcoder_agent.bend` (`run_tests.sh:21-23`), any new Bend module
+Bendcoder creates is invisible to its own verifier — and an unverified file is
 exactly where a self-improving agent will quietly accumulate damage. It is also
 what makes steps 5–9 single-hunk edits instead of two-file ones, because a new
 function and its expected output land in the same file.

@@ -4,7 +4,7 @@ import Base
 # reads.bend: the loop's read bookkeeping — per-file cursors, the pending read
 # a refused edit names, and the Book that carries them between steps
 # ==============================================================================
-# bender_agent.c keeps this in globals: read_cursors[], pending_read and
+# bendcoder_agent.c keeps this in globals: read_cursors[], pending_read and
 # search_miss_run. Bend has no globals, so the same record travels inside the
 # loop's Progress as a typed value: the Book is the loop's side-state, handed
 # to each handler and handed back with whatever it changed.
@@ -12,7 +12,7 @@ import Base
 
 # One file's cursor: `next` is the 1-indexed line the next read serves;
 # `done` marks a file read to the end, which drops it out of the read
-# picker's options (bender_agent.c's exhausted flag).
+# picker's options (bendcoder_agent.c's exhausted flag).
 type ReadMark is Data:
   Rd{path: String, next: U32, done: Bool}
 
@@ -21,9 +21,9 @@ type ReadMark is Data:
 # else notices it. `reads` is the per-file cursor table. `want` is the file
 # a refused blind edit named for the next read (#35's mechanism). `read_once`
 # is whether any read_code has run, which is what the route's "only drafted
-# against code already read" guard tests — bender_agent.c's read_phase != 0.
+# against code already read" guard tests — bendcoder_agent.c's read_phase != 0.
 # `low` counts consecutive decisions under the general confidence floor —
-# bender_agent.c's low_confidence_run.
+# bendcoder_agent.c's low_confidence_run.
 type Book is Data:
   Bk{
     misses: U32,
@@ -49,7 +49,7 @@ def book_missed(+b: Book) -> Book:
       Bk{U32.inc(misses), reads, want, ro, low}
 
 # A refused blind edit names the file it needed: the next read serves it
-# rather than asking again — pending_read in bender_agent.c.
+# rather than asking again — pending_read in bendcoder_agent.c.
 def book_want(+b: Book, +path: String) -> Book:
   match b:
     case Bk{misses, +reads, want, +ro, +low}:
@@ -63,7 +63,7 @@ def book_marks(+b: Book) -> List<&2, ReadMark>:
       reads
 
 # The flail counter: a decision under the general confidence floor bumps it,
-# a confident one clears it — low_confidence_run in bender_agent.c.
+# a confident one clears it — low_confidence_run in bendcoder_agent.c.
 def book_tally(+b: Book, under: Bool) -> Book:
   match b under:
     case Bk{+misses, +reads, +want, +ro, +l} True{}:
@@ -72,7 +72,7 @@ def book_tally(+b: Book, under: Bool) -> Book:
       Bk{misses, reads, want, ro, 0}
 
 # Consecutive under-floor decisions the loop tolerates before it stops —
-# BENDER_MAX_LOW_CONFIDENCE. Kept beside the counter it compares against.
+# BENDCODER_MAX_LOW_CONFIDENCE. Kept beside the counter it compares against.
 def low_limit() -> U32: 3
 
 # Enough consecutive under-floor decisions to stop rather than flail —
@@ -167,7 +167,7 @@ def book_served(+b: Book, +path: String, next: U32, done: Bool) -> Book:
     case Bk{misses, +reads, want, ro, +low}:
       Bk{0, rd_put(reads, path, next, done), None{}, True{}, low}
 
-# The phase-0 listing+README read serves no tracked page — bender_agent.c's
+# The phase-0 listing+README read serves no tracked page — bendcoder_agent.c's
 # first read creates no cursor — but it still counts as a read for the
 # route guards and ends the miss run.
 def book_phase0(+b: Book) -> Book:
@@ -183,7 +183,7 @@ def book_exhaust(+b: Book, +path: String, next: U32) -> Book:
       Bk{0, rd_put(reads, path, next, True{}), want, ro, low}
 
 # Enough consecutive search misses to turn a search into a read —
-# BENDER_SEARCH_MISS_LIMIT. Kept beside the counter it compares against.
+# BENDCODER_SEARCH_MISS_LIMIT. Kept beside the counter it compares against.
 def miss_limit() -> U32: 2
 
 # The deterministic sibling of the `repeats` Noul: a search that keeps
@@ -216,7 +216,7 @@ def rd_has(+xs: List<&2, ReadMark>, +path: String) -> Bool:
 # The coverage manifest: run_tests.sh ends with one "COVERED: <path>" line per
 # file it exercises, so a green run over a file absent from the list is the
 # weaker thing it is rather than verification (#22). suite_covers in
-# bender_agent.c answers with three states, and so does this.
+# bendcoder_agent.c answers with three states, and so does this.
 # ------------------------------------------------------------------------------
 type Cover is Data:
   # No "COVERED: " line at all — whether the suite exercises the file is unknown.

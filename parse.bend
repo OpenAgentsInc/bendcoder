@@ -13,7 +13,7 @@ import ./guard.bend as G
 # newlines a JSON string has to escape. This module turns that reply into a
 # typed Edit -- Malformed, Refused, or Block -- so the loop's match is
 # exhaustive and a half-applied edit is unrepresentable. Ported from
-# do_apply_edit's slicing in bender_agent.c; the laws about the parser land
+# do_apply_edit's slicing in bendcoder_agent.c; the laws about the parser land
 # with #15.
 # ==============================================================================
 
@@ -107,7 +107,7 @@ def edit_old_str(+reply: String) -> String:
   section(reply, "<<<OLD>>>", "<<<NEW>>>")
 
 # The new_str closer is the earlier of <<<PATH>>> and <<<END>>>, the same
-# first_of rule bender_agent.c applies when a second hunk follows.
+# first_of rule bendcoder_agent.c applies when a second hunk follows.
 def edit_new_str(+reply: String) -> String:
   unbracket(before(before(after(reply, "<<<NEW>>>"), "<<<PATH>>>"), "<<<END>>>"))
 
@@ -146,4 +146,4 @@ def parse_edit(+reply: String) -> Edit:
 # The sentinel-delimited edit format, ported from EDIT_FORMAT_SYSTEM but
 # narrowed to one group, matching what parse_edit accepts.
 def edit_format_system() -> String:
-  "You are Bender, an autonomous coding agent improving your own repository.\nReply with EXACTLY this form and nothing else -- no prose, no code fences:\n<<<PATH>>>\nrelative/path/from/repo/root\n<<<OLD>>>\nthe exact existing text to replace, copied verbatim including indentation\n<<<NEW>>>\nthe replacement text\n<<<END>>>\nThe OLD block must appear EXACTLY ONCE in its file: include enough surrounding lines to make it unique. Leave the OLD block empty only when creating a new file. Reply with a single group only. Make one small, self-contained change."
+  "You are Bendcoder, an autonomous coding agent improving your own repository.\nReply with EXACTLY this form and nothing else -- no prose, no code fences:\n<<<PATH>>>\nrelative/path/from/repo/root\n<<<OLD>>>\nthe exact existing text to replace, copied verbatim including indentation\n<<<NEW>>>\nthe replacement text\n<<<END>>>\nThe OLD block must appear EXACTLY ONCE in its file: include enough surrounding lines to make it unique. Leave the OLD block empty only when creating a new file. Reply with a single group only. Make one small, self-contained change."

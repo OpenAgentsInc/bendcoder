@@ -7,7 +7,7 @@ import ./selector.bend as S
 import ./reads.bend as R
 
 # ==============================================================================
-# Bender: Autonomous Coding Agent Loop
+# Bendcoder: Autonomous Coding Agent Loop
 # ==============================================================================
 # Classify, Generate, the question and answer types and the file tools live in
 # agent_primitives.bend (`P.`); the action space in action.bend (`A.`); the
@@ -182,7 +182,7 @@ def report(+label: String, +out: String, +book: R.Book) -> IO(Progress):
   remember(rep.of(label, out), label, out, R.book_acted(book))
 
 # A model asked for one search string routinely prepends its reasoning, so the
-# last non-empty line is taken. Mirrors extract_search_pattern in bender_agent.c.
+# last non-empty line is taken. Mirrors extract_search_pattern in bendcoder_agent.c.
 def keep_last(best: String, line: String) -> String:
   +t = String.trim(line)
   Bool.pick(String, String.is_empty(t), best, t)
@@ -283,12 +283,12 @@ def act_run_build(+book: R.Book) -> IO(Progress):
 # file and an exhausted file is never re-offered. A refused blind edit names
 # its file directly, skipping the pick the way pending_read does in C.
 
-# Lines a read serves per page — BENDER_READ_PAGE.
+# Lines a read serves per page — BENDCODER_READ_PAGE.
 def read_page() -> U32: 200
 
 # One page of a tracked file into the state. The cursor's `next` is the
 # offset; a page that comes back as the past-end warning marks the file done
-# and reports it read in full, the way serve_read_page in bender_agent.c does.
+# and reports it read in full, the way serve_read_page in bendcoder_agent.c does.
 def serve_read_page.fin(+label: String, +content: String, +book: R.Book, +path: String, +off: U32, past_end: Bool) -> IO(Progress):
   match past_end:
     case True{}:
@@ -397,7 +397,7 @@ def act_generate_answer(+state: P.State, +book: R.Book) -> IO(Progress):
     u1 : Unit <- IO.print(U.color_magenta("[TOOL GENERATE] Calling LLM (OpenRouter) to generate code ..."))
     gen : String <- P.GenerateText(
       "openai/gpt-oss-120b:nitro",
-      "You are Bender, an autonomous coding agent written in Bend2. Produce concise, direct code.",
+      "You are Bendcoder, an autonomous coding agent written in Bend2. Produce concise, direct code.",
       "State:\n" ++ P.state_text(state) ++ "\nTask: Describe the single next change that would advance this goal."
     )
     report("Generated Plan", gen, book)
@@ -405,7 +405,7 @@ def act_generate_answer(+state: P.State, +book: R.Book) -> IO(Progress):
 # ------------------------------------------------------------------------------
 # apply_edit: draft an edit, apply it, verify, roll back on failure
 # ------------------------------------------------------------------------------
-# The Bend twin of do_apply_edit in bender_agent.c, over the existing FFI:
+# The Bend twin of do_apply_edit in bendcoder_agent.c, over the existing FFI:
 # ReadFile for the snapshot, EditFile to apply, Exec to verify, WriteFile to
 # restore. Where the C applies a batch of hunks as a unit, this port takes one
 # <<<PATH>>>/<<<OLD>>>/<<<NEW>>> group per edit and refuses a reply carrying
@@ -427,7 +427,7 @@ def rollback_of(existed: Bool, +path: String, +backup: String) -> IO(String):
 # A green suite is only evidence about the files it reads. The coverage
 # manifest run_tests.sh prints is checked for the file just edited, and a
 # pass over a file no check reads is reported as the weaker thing it is —
-# suite_covers in bender_agent.c. See #22.
+# suite_covers in bendcoder_agent.c. See #22.
 def keep_verdict(c: R.Cover, +path: String, +out: String, +book: R.Book) -> IO(Progress):
   match c:
     case R.CCovered{}:
@@ -464,7 +464,7 @@ def verify_outcome(r: Result<&1, &1, U32 & String, String>, +path: String, +back
       (code, out) = e
       after_verify(False{}, code, path, backup, out, existed, book)
 
-# BENDER_VERIFY_CMD points the check at a different suite, as in the C loop;
+# BENDCODER_VERIFY_CMD points the check at a different suite, as in the C loop;
 # the command arrives + so it can be both announced and run.
 def run_verify(+cmd: String, +path: String, +backup: String, existed: Bool, +book: R.Book) -> IO(Progress):
   do IO<Progress>:
@@ -481,7 +481,7 @@ def applied.of(r: E.ToolResult, +path: String, +backup: String, existed: Bool, +
     case E.Ok{+output}:
       do IO<Progress>:
         u1 : Unit <- IO.print("   " ++ output)
-        env : Result<&1, &1, U32 & String, String> <- IO.get_env("BENDER_VERIFY_CMD")
+        env : Result<&1, &1, U32 & String, String> <- IO.get_env("BENDCODER_VERIFY_CMD")
         run_verify(Result.default(&1, &1, U32 & String, String, env, "./run_tests.sh"), path, backup, existed, book)
 
 # EditFile reports failure as "error: ..." text over the string-only FFI;
@@ -501,7 +501,7 @@ def apply_block(+path: String, old_str: String, new_str: String, existed: Bool, 
     applied(res, path, backup, existed, book)
 
 # An edit to a file the agent has not read is a guess — the same refusal
-# bender_agent.c applies ("has not been read yet"), and the file's name goes
+# bendcoder_agent.c applies ("has not been read yet"), and the file's name goes
 # into the Book so the next read serves it rather than asking again. A path
 # that does not exist yet is new code, not unread code, so the guard only
 # fires on files that exist.
@@ -547,7 +547,7 @@ def draft_apply_edit(+state: P.State, +book: R.Book) -> IO(Progress):
 # ------------------------------------------------------------------------------
 # The anchored edit: a Choice over line ids, never a transcribed old_string
 # ------------------------------------------------------------------------------
-# The Bend twin of try_anchor_edit in bender_agent.c. Jev picks the file, the
+# The Bend twin of try_anchor_edit in bendcoder_agent.c. Jev picks the file, the
 # line window and the anchor line; the exact `old_str` bytes are sliced out of
 # the file that was read — the model is never asked to reproduce them, so it
 # cannot invent them (#23's failure made impossible rather than recoverable).
@@ -614,7 +614,7 @@ def extract_new_str(+reply: String) -> String:
     reply)
 
 def new_format_system() -> String:
-  "You are Bender, an autonomous coding agent improving your own repository.\nThe existing text to replace is given to you exactly. Reply with the replacement text and nothing else -- no prose, no code fences, no line numbers."
+  "You are Bendcoder, an autonomous coding agent improving your own repository.\nThe existing text to replace is given to you exactly. Reply with the replacement text and nothing else -- no prose, no code fences, no line numbers."
 
 # The anchor's line number must land inside the file it was picked from: a
 # line past the end would silently anchor the edit at the last line instead.
@@ -865,7 +865,7 @@ def run_answers(+answers: S.LoopAnswers, +state: P.State, +book: R.Book, last: B
 
 # Jev saying, step after step, that it does not know. Acting on it anyway is
 # how a run burns its whole budget and lands nothing — low_confidence_run's
-# halt in bender_agent.c, checked after this step's decision is tallied into
+# halt in bendcoder_agent.c, checked after this step's decision is tallied into
 # the Book that run_answers and the recursion see. Returns a Progress so the
 # recursion below stays the only caller of itself.
 def step_decide(flailing: Bool, +answers: S.LoopAnswers, +state: P.State, +book: R.Book, last: Bool) -> IO(Progress):
@@ -887,7 +887,7 @@ def agent_step(fuel: Nat, phase: Progress, +step_num: U32, +state: P.State) -> I
     # reported as complete, not as having run out of fuel.
     case f Finished{}:
       do IO<Unit>:
-        u1 : Unit <- IO.print(U.color_green("[TASK COMPLETED] Bender verified all goals are met!"))
+        u1 : Unit <- IO.print(U.color_green("[TASK COMPLETED] Bendcoder verified all goals are met!"))
         IO.print(U.color_cyan("================================================================================"))
     case f Stalled{reason}:
       IO.print(U.color_yellow("[STALLED] ") ++ reason)
@@ -946,7 +946,7 @@ def run_agent(+fuel: Nat, +goal: String) -> IO(Unit):
       " repository paths injected into the state.")
     agent_step(fuel, Running{rep.empty(), R.book.new()}, 1, P.state.new(goal, paths, U32.from_nat(fuel)))
 
-# BENDER_MAX_STEPS raises the ceiling for a longer run — a non-positive or
+# BENDCODER_MAX_STEPS raises the ceiling for a longer run — a non-positive or
 # unparseable value leaves the default, atoi's "0 means no override" reading.
 def fuel_pos(+n: Nat, pos: Bool) -> Nat:
   match pos:
@@ -970,11 +970,11 @@ def fuel_of(r: Result<&1, &1, U32 & String, String>) -> Nat:
       6n
 
 # Bend has no argv — Base offers only IO.get_env — so the goal arrives as an
-# environment variable, where bender_agent.c takes it from argv[1].
+# environment variable, where bendcoder_agent.c takes it from argv[1].
 def main() -> IO(Unit):
   do IO<Unit>:
-    env : Result<&1, &1, U32 & String, String> <- IO.get_env("BENDER_GOAL")
-    steps : Result<&1, &1, U32 & String, String> <- IO.get_env("BENDER_MAX_STEPS")
+    env : Result<&1, &1, U32 & String, String> <- IO.get_env("BENDCODER_GOAL")
+    steps : Result<&1, &1, U32 & String, String> <- IO.get_env("BENDCODER_MAX_STEPS")
     run_agent(
       fuel_of(steps),
-      Result.default(&1, &1, U32 & String, String, env, "Project: Bender repo. Goal: Inspect the repository, verify hello.bend, and confirm autonomous capabilities are operating."))
+      Result.default(&1, &1, U32 & String, String, env, "Project: Bendcoder repo. Goal: Inspect the repository, verify hello.bend, and confirm autonomous capabilities are operating."))

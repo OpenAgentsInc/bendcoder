@@ -1,14 +1,14 @@
 // Read / Write / Edit: the three self-improvement file tools, adapted from
 // ~/coder (crates/coder-tools/src/cc/{read,write,edit}.rs) into plain C so the
 // Bend FFI layer (sys_c.c) wraps one implementation — the agent loop itself
-// lives in bender_agent.bend.
+// lives in bendcoder_agent.bend.
 //
 // Every entry point returns a malloc'd string the caller frees. Failures come
 // back as readable text prefixed with "error: " rather than as a status code,
 // because that text is fed straight back into the agent's state for the next
 // Classify round.
-#ifndef BENDER_TOOLS_C_H
-#define BENDER_TOOLS_C_H
+#ifndef BENDCODER_TOOLS_C_H
+#define BENDCODER_TOOLS_C_H
 
 #include <errno.h>
 #include <stdio.h>
@@ -21,22 +21,22 @@
 
 // MAX_OUTPUT_SIZE from ~/coder files.rs: the whole-file size a Read refuses
 // once no limit narrows it, so a stray read cannot swamp the agent's state.
-#define BENDER_MAX_OUTPUT_SIZE (256 * 1024)
+#define BENDCODER_MAX_OUTPUT_SIZE (256 * 1024)
 
 // How much of a line the nearest-match hint shows when an Edit misses.
-#define BENDER_NEAREST_MAX_LINE 200
+#define BENDCODER_NEAREST_MAX_LINE 200
 
 // ----------------------------------------------------------------------------
 // Shared helpers
 // ----------------------------------------------------------------------------
 
-static char* bender_fmt(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
+static char* bendcoder_fmt(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 
 #include <stdarg.h>
 
 // Allocates exactly as much as the formatted message needs, so an error can
 // quote an arbitrarily long old_string without being clipped.
-static char* bender_fmt(const char* fmt, ...) {
+static char* bendcoder_fmt(const char* fmt, ...) {
   va_list ap;
   va_start(ap, fmt);
   va_list ap2;
@@ -59,7 +59,7 @@ static char* bender_fmt(const char* fmt, ...) {
 
 // Reads the whole file. Returns NULL when it cannot be opened; on success
 // *out_len holds the byte count and the buffer is NUL-terminated.
-static char* bender_slurp(const char* path, size_t* out_len) {
+static char* bendcoder_slurp(const char* path, size_t* out_len) {
   FILE* f = fopen(path, "rb");
   if (!f) return NULL;
   fseek(f, 0, SEEK_END);
@@ -75,27 +75,27 @@ static char* bender_slurp(const char* path, size_t* out_len) {
   return buf;
 }
 
-static int bender_is_dir(const char* path) {
+static int bendcoder_is_dir(const char* path) {
   struct stat st;
   if (stat(path, &st) != 0) return 0;
   return S_ISDIR(st.st_mode);
 }
 
-static int bender_exists(const char* path) {
+static int bendcoder_exists(const char* path) {
   struct stat st;
   return stat(path, &st) == 0;
 }
 
 // `mkdir -p` over the path's parent directories, so Write and Edit can create
 // a file in a directory that does not exist yet.
-static int bender_mkdir_parents(const char* path) {
+static int bendcoder_mkdir_parents(const char* path) {
   char* copy = strdup(path);
   if (!copy) return -1;
   int rc = 0;
   for (char* p = copy + 1; *p; p++) {
     if (*p != '/') continue;
     *p = '\0';
-    if (!bender_exists(copy) && mkdir(copy, 0755) != 0) { rc = -1; }
+    if (!bendcoder_exists(copy) && mkdir(copy, 0755) != 0) { rc = -1; }
     *p = '/';
     if (rc != 0) break;
   }
@@ -103,7 +103,7 @@ static int bender_mkdir_parents(const char* path) {
   return rc;
 }
 
-static size_t bender_count_matches(const char* haystack, const char* needle) {
+static size_t bendcoder_count_matches(const char* haystack, const char* needle) {
   size_t needle_len = strlen(needle);
   if (needle_len == 0) return 0;
   size_t count = 0;
@@ -118,12 +118,12 @@ static size_t bender_count_matches(const char* haystack, const char* needle) {
 // Replaces the first `max` occurrences of `old` with `new` (max == 0 replaces
 // every occurrence). *out_len receives the result's byte length so a content
 // with embedded NULs still writes back at the right size.
-static char* bender_replace(const char* content, size_t content_len,
+static char* bendcoder_replace(const char* content, size_t content_len,
                             const char* old_str, const char* new_str,
                             size_t max, size_t* out_len) {
   size_t old_len = strlen(old_str);
   size_t new_len = strlen(new_str);
-  size_t hits = bender_count_matches(content, old_str);
+  size_t hits = bendcoder_count_matches(content, old_str);
   if (max > 0 && hits > max) hits = max;
 
   size_t cap = content_len + hits * new_len + 1;
@@ -156,13 +156,13 @@ static char* bender_replace(const char* content, size_t content_len,
   return out;
 }
 
-static char* bender_write_bytes(const char* path, const char* data, size_t len) {
-  bender_mkdir_parents(path);
+static char* bendcoder_write_bytes(const char* path, const char* data, size_t len) {
+  bendcoder_mkdir_parents(path);
   FILE* f = fopen(path, "wb");
-  if (!f) return bender_fmt("error: Failed to open %s for writing", path);
+  if (!f) return bendcoder_fmt("error: Failed to open %s for writing", path);
   size_t w = fwrite(data, 1, len, f);
   fclose(f);
-  if (w != len) return bender_fmt("error: Short write to %s (%zu of %zu bytes)", path, w, len);
+  if (w != len) return bendcoder_fmt("error: Short write to %s (%zu of %zu bytes)", path, w, len);
   return NULL;
 }
 
@@ -181,9 +181,9 @@ static char* bender_write_bytes(const char* path, const char* data, size_t len) 
 // after the BOM strip; on failure *code is an errno-style category and the
 // buffer holds the "error: " text tool_read reported.
 static char* tool_read_io(const char* path, long limit, int* code, size_t* len) {
-  if (bender_is_dir(path)) {
+  if (bendcoder_is_dir(path)) {
     *code = EISDIR;
-    char* msg = bender_fmt("error: EISDIR: illegal operation on a directory, read '%s'", path);
+    char* msg = bendcoder_fmt("error: EISDIR: illegal operation on a directory, read '%s'", path);
     *len = msg ? strlen(msg) : 0;
     return msg;
   }
@@ -191,24 +191,24 @@ static char* tool_read_io(const char* path, long limit, int* code, size_t* len) 
   struct stat st;
   if (stat(path, &st) != 0) {
     *code = ENOENT;
-    char* msg = bender_fmt("error: File does not exist: %s", path);
+    char* msg = bendcoder_fmt("error: File does not exist: %s", path);
     *len = msg ? strlen(msg) : 0;
     return msg;
   }
-  if (limit <= 0 && st.st_size > BENDER_MAX_OUTPUT_SIZE) {
+  if (limit <= 0 && st.st_size > BENDCODER_MAX_OUTPUT_SIZE) {
     *code = EFBIG;
-    char* msg = bender_fmt(
+    char* msg = bendcoder_fmt(
       "error: File content (%lld bytes) exceeds maximum allowed size (%d bytes). "
       "Use offset and limit to read specific portions of the file.",
-      (long long)st.st_size, BENDER_MAX_OUTPUT_SIZE);
+      (long long)st.st_size, BENDCODER_MAX_OUTPUT_SIZE);
     *len = msg ? strlen(msg) : 0;
     return msg;
   }
 
-  char* content = bender_slurp(path, len);
+  char* content = bendcoder_slurp(path, len);
   if (!content) {
     *code = EIO;
-    char* msg = bender_fmt("error: Failed to read %s", path);
+    char* msg = bendcoder_fmt("error: Failed to read %s", path);
     *len = msg ? strlen(msg) : 0;
     return msg;
   }
@@ -285,7 +285,7 @@ static char* tool_read(const char* path, long offset, long limit) {
 
   if (emitted == 0) {
     free(out);
-    return bender_fmt(
+    return bendcoder_fmt(
       "<system-reminder>Warning: the file exists but is shorter than the provided offset (%ld). "
       "The file has %ld lines.</system-reminder>", offset, index);
   }
@@ -297,15 +297,15 @@ static char* tool_read(const char* path, long offset, long limit) {
 // ----------------------------------------------------------------------------
 // Full write / overwrite, creating any missing parent directories.
 static char* tool_write(const char* path, const char* content, size_t len) {
-  if (bender_is_dir(path)) {
-    return bender_fmt("error: EISDIR: illegal operation on a directory, write '%s'", path);
+  if (bendcoder_is_dir(path)) {
+    return bendcoder_fmt("error: EISDIR: illegal operation on a directory, write '%s'", path);
   }
-  int existed = bender_exists(path);
-  char* err = bender_write_bytes(path, content, len);
+  int existed = bendcoder_exists(path);
+  char* err = bendcoder_write_bytes(path, content, len);
   if (err) return err;
   return existed
-    ? bender_fmt("The file %s has been updated successfully.", path)
-    : bender_fmt("File created successfully at: %s", path);
+    ? bendcoder_fmt("The file %s has been updated successfully.", path)
+    : bendcoder_fmt("File created successfully at: %s", path);
 }
 
 // A model that has just read a file through Read sees "N\tline" and routinely
@@ -313,7 +313,7 @@ static char* tool_write(const char* path, const char* content, size_t len) {
 // but keeping the tab. Strips a leading line-number prefix from each line so
 // such an old_string can still be matched against the file. Only ever used as
 // a fallback after the exact string fails, and only kept when it resolves.
-static char* bender_strip_line_prefixes(const char* s, int* changed) {
+static char* bendcoder_strip_line_prefixes(const char* s, int* changed) {
   size_t len = strlen(s);
   char* out = (char*)malloc(len + 1);
   if (!out) return NULL;
@@ -353,7 +353,7 @@ static char* bender_strip_line_prefixes(const char* s, int* changed) {
 // nothing to correct against and proposes the same text again. This locates the
 // longest leading run of old_string that does occur and renders the real lines
 // there, turning the failure into a correction signal.
-static char* bender_nearest_hint(const char* content, const char* old_str) {
+static char* bendcoder_nearest_hint(const char* content, const char* old_str) {
   // Every line of old_string is tried as an anchor, not just the first. When a
   // model fabricates, it usually invents around something real — a made-up
   // comment above a genuine line of code — so the first line is often the least
@@ -399,13 +399,13 @@ static char* bender_nearest_hint(const char* content, const char* old_str) {
 
   // Four lines, each clipped, is all the context that is useful here, so a
   // fixed buffer is enough and keeps this independent of the Grep section.
-  char out[4 * (BENDER_NEAREST_MAX_LINE + 24)];
+  char out[4 * (BENDCODER_NEAREST_MAX_LINE + 24)];
   size_t o = 0;
   const char* p = line_start;
   for (int i = 0; i < 4 && *p && o < sizeof(out) - 1; i++) {
     const char* e = strchr(p, '\n');
     size_t l = e ? (size_t)(e - p) : strlen(p);
-    if (l > BENDER_NEAREST_MAX_LINE) l = BENDER_NEAREST_MAX_LINE;
+    if (l > BENDCODER_NEAREST_MAX_LINE) l = BENDCODER_NEAREST_MAX_LINE;
     int n = snprintf(out + o, sizeof(out) - o, "%ld:%.*s\n", line_no + i, (int)l, p);
     if (n < 0) break;
     o += (size_t)n < sizeof(out) - o ? (size_t)n : sizeof(out) - o - 1;
@@ -428,37 +428,37 @@ static char* tool_edit(const char* path, const char* old_str, const char* new_st
     return strdup("error: `old_string` and `new_string` are identical; nothing to replace.");
   }
 
-  int existed = bender_exists(path);
+  int existed = bendcoder_exists(path);
 
   // An empty old_string means "create this file", matching ~/coder's Edit.
   if (old_str[0] == '\0') {
     if (existed) {
-      return bender_fmt("error: Cannot create new file - file already exists: %s", path);
+      return bendcoder_fmt("error: Cannot create new file - file already exists: %s", path);
     }
-    char* err = bender_write_bytes(path, new_str, strlen(new_str));
+    char* err = bendcoder_write_bytes(path, new_str, strlen(new_str));
     if (err) return err;
-    return bender_fmt("File created successfully at: %s", path);
+    return bendcoder_fmt("File created successfully at: %s", path);
   }
 
-  if (!existed) return bender_fmt("error: File does not exist: %s", path);
-  if (bender_is_dir(path)) {
-    return bender_fmt("error: EISDIR: illegal operation on a directory, edit '%s'", path);
+  if (!existed) return bendcoder_fmt("error: File does not exist: %s", path);
+  if (bendcoder_is_dir(path)) {
+    return bendcoder_fmt("error: EISDIR: illegal operation on a directory, edit '%s'", path);
   }
 
   size_t len = 0;
-  char* content = bender_slurp(path, &len);
-  if (!content) return bender_fmt("error: Failed to read %s", path);
+  char* content = bendcoder_slurp(path, &len);
+  if (!content) return bendcoder_fmt("error: Failed to read %s", path);
 
-  size_t matches = bender_count_matches(content, old_str);
+  size_t matches = bendcoder_count_matches(content, old_str);
 
   // The exact string is authoritative. Only when it is absent is the
   // line-number-stripped spelling tried, and only if that one resolves.
   char* stripped = NULL;
   if (matches == 0) {
     int changed = 0;
-    stripped = bender_strip_line_prefixes(old_str, &changed);
+    stripped = bendcoder_strip_line_prefixes(old_str, &changed);
     if (stripped && changed) {
-      size_t stripped_matches = bender_count_matches(content, stripped);
+      size_t stripped_matches = bendcoder_count_matches(content, stripped);
       if (stripped_matches > 0) {
         old_str = stripped;
         matches = stripped_matches;
@@ -467,16 +467,16 @@ static char* tool_edit(const char* path, const char* old_str, const char* new_st
   }
 
   if (matches == 0) {
-    char* hint = bender_nearest_hint(content, old_str);
+    char* hint = bendcoder_nearest_hint(content, old_str);
     char* err;
     if (hint) {
-      err = bender_fmt(
+      err = bendcoder_fmt(
         "error: String to replace not found in %s. The closest text found is:\n%s\n"
         "Copy from there exactly, without the \"N<tab>\" prefix Read adds.\n"
         "Your string was:\n%s", path, hint, old_str);
       free(hint);
     } else {
-      err = bender_fmt(
+      err = bendcoder_fmt(
         "error: String to replace not found in %s, and no part of it appears in "
         "the file at all — re-read the file before editing it.\nYour string was:\n%s",
         path, old_str);
@@ -486,7 +486,7 @@ static char* tool_edit(const char* path, const char* old_str, const char* new_st
     return err;
   }
   if (matches > 1 && !replace_all) {
-    char* err = bender_fmt(
+    char* err = bendcoder_fmt(
       "error: Found %zu matches of the string to replace in %s, but replace_all is false. "
       "To replace all occurrences set replace_all to true. To replace one occurrence, "
       "provide more context to uniquely identify the instance.\nString: %s",
@@ -518,20 +518,20 @@ static char* tool_edit(const char* path, const char* old_str, const char* new_st
   }
 
   size_t updated_len = 0;
-  char* updated = bender_replace(content, len, search, new_str,
+  char* updated = bendcoder_replace(content, len, search, new_str,
                                  replace_all ? 0 : 1, &updated_len);
   free(content);
   free(search_owned);
   free(stripped);
   if (!updated) return strdup("error: out of memory");
 
-  char* err = bender_write_bytes(path, updated, updated_len);
+  char* err = bendcoder_write_bytes(path, updated, updated_len);
   free(updated);
   if (err) return err;
 
   return replace_all
-    ? bender_fmt("The file %s has been updated. All %zu occurrences were successfully replaced.", path, matches)
-    : bender_fmt("The file %s has been updated successfully.", path);
+    ? bendcoder_fmt("The file %s has been updated. All %zu occurrences were successfully replaced.", path, matches)
+    : bendcoder_fmt("The file %s has been updated successfully.", path);
 }
 
 // ----------------------------------------------------------------------------
@@ -545,21 +545,21 @@ static char* tool_edit(const char* path, const char* old_str, const char* new_st
 // Matches are capped on both counts because the result goes into the agent's
 // state: a common pattern over a whole tree would otherwise crowd out
 // everything else the agent had learned.
-#define BENDER_GREP_MAX_MATCHES 200
-#define BENDER_GREP_MAX_LINE 500
-#define BENDER_GREP_MAX_FILE_SIZE (1024 * 1024)
+#define BENDCODER_GREP_MAX_MATCHES 200
+#define BENDCODER_GREP_MAX_LINE 500
+#define BENDCODER_GREP_MAX_FILE_SIZE (1024 * 1024)
 
 // Lines shown on either side of a hit, like grep -C. A bare "path:N:line"
 // says where a match is but nothing about what contains it — which function,
 // which struct — and the model invented the rest.
-#define BENDER_GREP_CONTEXT 3
+#define BENDCODER_GREP_CONTEXT 3
 
 // The shortest piece of a missed pattern worth reporting (shorter pieces
 // match everywhere and say nothing), how many file names the report lists,
 // and the room kept for them.
-#define BENDER_FRAG_MIN 4
-#define BENDER_FRAG_MAX_NAMES 6
-#define BENDER_FRAG_NAMES_CAP 768
+#define BENDCODER_FRAG_MIN 4
+#define BENDCODER_FRAG_MAX_NAMES 6
+#define BENDCODER_FRAG_NAMES_CAP 768
 
 typedef struct {
   char* data;
@@ -588,7 +588,7 @@ static void grep_sink_fmt(GrepSink* g, const char* fmt, ...) {
   if (g->failed) return;
   va_list ap;
   va_start(ap, fmt);
-  char buf[BENDER_GREP_MAX_LINE + 512];
+  char buf[BENDCODER_GREP_MAX_LINE + 512];
   int n = vsnprintf(buf, sizeof(buf), fmt, ap);
   va_end(ap);
   if (n > 0) grep_sink_put(g, buf, (size_t)n < sizeof(buf) ? (size_t)n : sizeof(buf) - 1);
@@ -609,7 +609,7 @@ static int line_has(const char* line, const char* pattern, int ci) {
 // ("path-N-line"), the convention grep -C prints.
 static void grep_emit(GrepSink* g, const char* label, size_t line_no,
                       const char* text, size_t line_len, char sep) {
-  size_t shown = line_len > BENDER_GREP_MAX_LINE ? BENDER_GREP_MAX_LINE : line_len;
+  size_t shown = line_len > BENDCODER_GREP_MAX_LINE ? BENDCODER_GREP_MAX_LINE : line_len;
   const char* clip = shown < line_len ? " ..." : "";
   if (label) {
     grep_sink_fmt(g, "%s%c%zu%c%.*s%s\n", label, sep, line_no, sep,
@@ -620,14 +620,14 @@ static void grep_emit(GrepSink* g, const char* label, size_t line_no,
 }
 
 // Scans one file's bytes. `label` prefixes each line when searching a tree,
-// and is NULL for a single-file search. Hits carry BENDER_GREP_CONTEXT lines
+// and is NULL for a single-file search. Hits carry BENDCODER_GREP_CONTEXT lines
 // on either side, with a "--" between blocks that do not touch.
 static void grep_scan(GrepSink* g, const char* pattern, const char* label,
                       char* text, size_t len, int ci) {
   // The ring holds the last few lines not yet emitted, so a hit can show the
   // lines just above it.
-  size_t ring_off[BENDER_GREP_CONTEXT];
-  size_t ring_len[BENDER_GREP_CONTEXT];
+  size_t ring_off[BENDCODER_GREP_CONTEXT];
+  size_t ring_len[BENDCODER_GREP_CONTEXT];
   int ring_n = 0;
   long emitted = 0;  // highest line number written so far
   int after = 0;     // trailing context lines still owed to the last hit
@@ -653,7 +653,7 @@ static void grep_scan(GrepSink* g, const char* pattern, const char* label,
     text[i + line_len] = saved;
 
     if (hit) {
-      if (g->matches >= BENDER_GREP_MAX_MATCHES) {
+      if (g->matches >= BENDCODER_GREP_MAX_MATCHES) {
         g->truncated = 1;
         return;
       }
@@ -671,16 +671,16 @@ static void grep_scan(GrepSink* g, const char* pattern, const char* label,
       grep_emit(g, label, line_no, text + i, line_len, ':');
       g->matches++;
       emitted = (long)line_no;
-      after = BENDER_GREP_CONTEXT;
+      after = BENDCODER_GREP_CONTEXT;
       ring_n = 0;
     } else if (after > 0) {
       grep_emit(g, label, line_no, text + i, line_len, '-');
       emitted = (long)line_no;
       after--;
     } else {
-      if (ring_n == BENDER_GREP_CONTEXT) {
-        memmove(ring_off, ring_off + 1, sizeof(ring_off[0]) * (BENDER_GREP_CONTEXT - 1));
-        memmove(ring_len, ring_len + 1, sizeof(ring_len[0]) * (BENDER_GREP_CONTEXT - 1));
+      if (ring_n == BENDCODER_GREP_CONTEXT) {
+        memmove(ring_off, ring_off + 1, sizeof(ring_off[0]) * (BENDCODER_GREP_CONTEXT - 1));
+        memmove(ring_len, ring_len + 1, sizeof(ring_len[0]) * (BENDCODER_GREP_CONTEXT - 1));
         ring_n--;
       }
       ring_off[ring_n] = i;
@@ -705,9 +705,9 @@ static void grep_file(GrepSink* g, const char* pattern, const char* path,
                       const char* label, int ci) {
   struct stat st;
   if (stat(path, &st) != 0 || !S_ISREG(st.st_mode)) return;
-  if (st.st_size > BENDER_GREP_MAX_FILE_SIZE) return;
+  if (st.st_size > BENDCODER_GREP_MAX_FILE_SIZE) return;
   size_t len = 0;
-  char* text = bender_slurp(path, &len);
+  char* text = bendcoder_slurp(path, &len);
   if (!text) return;
   if (!grep_looks_binary(text, len)) grep_scan(g, pattern, label, text, len, ci);
   free(text);
@@ -774,7 +774,7 @@ static void grep_tree(GrepSink* g, const char* pattern, const char* dir,
     } else {
       snprintf(child, sizeof(child), "%s/%s", dir, entry->d_name);
     }
-    if (bender_is_dir(child)) {
+    if (bendcoder_is_dir(child)) {
       grep_tree(g, pattern, child, tracked_only, ci);
     } else if (!tracked_only || is_tracked(child)) {
       grep_file(g, pattern, child, child, ci);
@@ -787,7 +787,7 @@ static void grep_tree(GrepSink* g, const char* pattern, const char* dir,
 // One pass over the search scope: a file on its own, or the tree under a
 // directory.
 static void grep_run(GrepSink* g, const char* pattern, const char* path, int ci) {
-  if (bender_is_dir(path)) {
+  if (bendcoder_is_dir(path)) {
     grep_tree(g, pattern, path, path[0] != '/', ci);
   } else {
     grep_file(g, pattern, path, NULL, ci);
@@ -807,7 +807,7 @@ static void grep_run(GrepSink* g, const char* pattern, const char* path, int ci)
 // Substring search over counted bytes — the needles are pieces of the
 // pattern, not NUL-terminated strings of their own. Case-insensitive, like
 // the retry that runs just before this.
-static const char* bender_memmem(const char* hay, size_t haylen,
+static const char* bendcoder_memmem(const char* hay, size_t haylen,
                                  const char* needle, size_t nlen) {
   if (nlen == 0) return hay;
   if (nlen > haylen) return NULL;
@@ -823,8 +823,8 @@ typedef struct {
   size_t best_pre, best_suf;   // longest prefix/suffix of pat seen anywhere
   size_t pre_files, suf_files; // how many files contain them
   int pre_named, suf_named;    // how many of those names were kept
-  char pre_names[BENDER_FRAG_NAMES_CAP];
-  char suf_names[BENDER_FRAG_NAMES_CAP];
+  char pre_names[BENDCODER_FRAG_NAMES_CAP];
+  char suf_names[BENDCODER_FRAG_NAMES_CAP];
 } FragScan;
 
 // The longest edge-piece of the pattern present in a buffer. Presence is
@@ -836,7 +836,7 @@ static size_t frag_longest(const char* text, size_t len, const char* pat,
   while (lo < hi) {
     size_t mid = lo + (hi - lo + 1) / 2;
     const char* needle = suffix ? pat + plen - mid : pat;
-    if (bender_memmem(text, len, needle, mid)) lo = mid; else hi = mid - 1;
+    if (bendcoder_memmem(text, len, needle, mid)) lo = mid; else hi = mid - 1;
   }
   return lo;
 }
@@ -857,9 +857,9 @@ static void frag_count(FragScan* fs, int suffix, size_t k, const char* path) {
     names[0] = '\0';
   }
   (*files)++;
-  if (*named < BENDER_FRAG_MAX_NAMES) {
+  if (*named < BENDCODER_FRAG_MAX_NAMES) {
     size_t used = strlen(names);
-    snprintf(names + used, BENDER_FRAG_NAMES_CAP - used, "%s%s",
+    snprintf(names + used, BENDCODER_FRAG_NAMES_CAP - used, "%s%s",
              used ? ", " : "", path);
     (*named)++;
   }
@@ -868,9 +868,9 @@ static void frag_count(FragScan* fs, int suffix, size_t k, const char* path) {
 static void frag_scan_file(FragScan* fs, const char* path) {
   struct stat st;
   if (stat(path, &st) != 0 || !S_ISREG(st.st_mode)) return;
-  if (st.st_size > BENDER_GREP_MAX_FILE_SIZE) return;
+  if (st.st_size > BENDCODER_GREP_MAX_FILE_SIZE) return;
   size_t len = 0;
-  char* text = bender_slurp(path, &len);
+  char* text = bendcoder_slurp(path, &len);
   if (!text) return;
   if (!grep_looks_binary(text, len)) {
     frag_count(fs, 0, frag_longest(text, len, fs->pat, fs->plen, 0), path);
@@ -893,7 +893,7 @@ static void frag_tree(FragScan* fs, const char* dir, int tracked_only) {
     } else {
       snprintf(child, sizeof(child), "%s/%s", dir, entry->d_name);
     }
-    if (bender_is_dir(child)) {
+    if (bendcoder_is_dir(child)) {
       frag_tree(fs, child, tracked_only);
     } else if (!tracked_only || is_tracked(child)) {
       frag_scan_file(fs, child);
@@ -908,7 +908,7 @@ static char* grep_fragment_hint(const char* pattern, const char* path, int is_di
   size_t plen = strlen(pattern);
   // A fragment is always shorter than the pattern, so a pattern this small
   // has no piece long enough to be worth reporting.
-  if (plen <= BENDER_FRAG_MIN) return NULL;
+  if (plen <= BENDCODER_FRAG_MIN) return NULL;
 
   FragScan fs;
   memset(&fs, 0, sizeof(fs));
@@ -919,7 +919,7 @@ static char* grep_fragment_hint(const char* pattern, const char* path, int is_di
   } else {
     frag_scan_file(&fs, path);
   }
-  if (fs.best_pre < BENDER_FRAG_MIN && fs.best_suf < BENDER_FRAG_MIN) return NULL;
+  if (fs.best_pre < BENDCODER_FRAG_MIN && fs.best_suf < BENDCODER_FRAG_MIN) return NULL;
 
   char pre_txt[96], suf_txt[96];
   snprintf(pre_txt, sizeof(pre_txt), "%.*s",
@@ -928,13 +928,13 @@ static char* grep_fragment_hint(const char* pattern, const char* path, int is_di
            (int)(fs.best_suf < 90 ? fs.best_suf : 90), pattern + plen - fs.best_suf);
   // The same piece can be both edges' best (a pattern like "ABXAB" missing
   // where "AB" occurs); report it once rather than twice.
-  int same_piece = fs.best_pre >= BENDER_FRAG_MIN &&
+  int same_piece = fs.best_pre >= BENDCODER_FRAG_MIN &&
                    fs.best_pre == fs.best_suf &&
                    strcmp(pre_txt, suf_txt) == 0;
 
   GrepSink m = {NULL, 0, 0, 0, 0, 0};
   grep_sink_fmt(&m, " Pieces of it do appear:");
-  if (fs.best_pre >= BENDER_FRAG_MIN) {
+  if (fs.best_pre >= BENDCODER_FRAG_MIN) {
     if (is_dir) {
       grep_sink_fmt(&m, "\n- '%s'%s in %zu file%s: %s%s", pre_txt,
                     same_piece ? "" : " (prefix)",
@@ -946,7 +946,7 @@ static char* grep_fragment_hint(const char* pattern, const char* path, int is_di
                     same_piece ? "" : " (prefix)");
     }
   }
-  if (!same_piece && fs.best_suf >= BENDER_FRAG_MIN) {
+  if (!same_piece && fs.best_suf >= BENDCODER_FRAG_MIN) {
     if (is_dir) {
       grep_sink_fmt(&m, "\n- '%s' (suffix) in %zu file%s: %s%s", suf_txt,
                     fs.suf_files, fs.suf_files == 1 ? "" : "s",
@@ -970,8 +970,8 @@ static char* tool_grep(const char* pattern, const char* path) {
   if (!pattern || pattern[0] == '\0') {
     return strdup("error: The search pattern is empty, which would match every line.");
   }
-  if (!bender_exists(path)) {
-    return bender_fmt("error: File does not exist: %s", path);
+  if (!bendcoder_exists(path)) {
+    return bendcoder_fmt("error: File does not exist: %s", path);
   }
 
   GrepSink g = {NULL, 0, 0, 0, 0, 0};
@@ -994,10 +994,10 @@ static char* tool_grep(const char* pattern, const char* path) {
     if (gi.matches > 0) {
       if (gi.truncated) {
         grep_sink_fmt(&gi, "... (stopped at %d matches; narrow the pattern)\n",
-                      BENDER_GREP_MAX_MATCHES);
+                      BENDCODER_GREP_MAX_MATCHES);
       }
       if (gi.len > 0 && gi.data[gi.len - 1] == '\n') gi.data[--gi.len] = '\0';
-      char* out = bender_fmt(
+      char* out = bendcoder_fmt(
         "No matches found for '%s' in %s, but a case-insensitive search found %zu:\n%s",
         pattern, path, gi.matches, gi.data);
       free(gi.data);
@@ -1007,21 +1007,21 @@ static char* tool_grep(const char* pattern, const char* path) {
 
     // Still nothing, even ignoring case: say which pieces of the pattern do
     // occur and where, so the next guess starts from something real.
-    char* hint = grep_fragment_hint(pattern, path, bender_is_dir(path));
+    char* hint = grep_fragment_hint(pattern, path, bendcoder_is_dir(path));
     char* out = hint
-      ? bender_fmt("No matches found for '%s' in %s.%s", pattern, path, hint)
-      : bender_fmt("No matches found for '%s' in %s.", pattern, path);
+      ? bendcoder_fmt("No matches found for '%s' in %s.%s", pattern, path, hint)
+      : bendcoder_fmt("No matches found for '%s' in %s.", pattern, path);
     free(hint);
     return out;
   }
 
   if (g.truncated) {
     grep_sink_fmt(&g, "... (stopped at %d matches; narrow the pattern)\n",
-                  BENDER_GREP_MAX_MATCHES);
+                  BENDCODER_GREP_MAX_MATCHES);
   }
   // The trailing newline belongs to the last line, not to the result.
   if (g.len > 0 && g.data[g.len - 1] == '\n') g.data[--g.len] = '\0';
   return g.data;
 }
 
-#endif  // BENDER_TOOLS_C_H
+#endif  // BENDCODER_TOOLS_C_H

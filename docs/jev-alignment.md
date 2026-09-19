@@ -1,10 +1,10 @@
 # Are we using Jev properly?
 
-An audit of Bender's `Classify` against TypeSafe's design rules and measured
+An audit of Bendcoder's `Classify` against TypeSafe's design rules and measured
 cookbooks, as recorded in `~/coder/docs/jev/`. Verified against a live call to
 `api.typesafe.ai/v1/systemone` on 2026-09-18.
 
-**Short answer: no.** Bender uses Jev as a four-question router over a string
+**Short answer: no.** Bendcoder uses Jev as a four-question router over a string
 blob. Jev is a next-step selector that can make the agent's dominant failure
 modes structurally impossible, and three of them are things this repository has
 already filed issues about.
@@ -28,16 +28,16 @@ Three properties drive everything below:
 1. **Every question sees the same state and is evaluated independently, in
    parallel.** Adding a question costs its own tokens and almost no latency.
    TypeSafe measured batching thirteen questions at **12.2× cheaper and 10.0×
-   faster** than asking them one at a time, with no change in answers. Bender
+   faster** than asking them one at a time, with no change in answers. Bendcoder
    asks four. It should ask a dozen.
 2. **Choice probabilities always sum to one.** The model *must* pick one of the
    options given. A Choice with no escape hatch cannot say "none of these fit".
-3. **It cannot generate text, so it cannot fabricate.** Anywhere Bender asks a
+3. **It cannot generate text, so it cannot fabricate.** Anywhere Bendcoder asks a
    generative model to *reproduce* something that already exists, Jev can
    *select* it instead, and the failure mode disappears rather than being
    recovered from.
 
-## What Bender sends today
+## What Bendcoder sends today
 
 ```json
 { "model": "jev-latest",
@@ -83,7 +83,7 @@ at or above 0.9 and absent ones at or below 0.05.
 `tool_read` **already** emits `N<tab>line`. Those line numbers are exactly the
 ids that cookbook wants.
 
-Today Bender asks a generative model to reproduce a file's bytes verbatim as
+Today Bendcoder asks a generative model to reproduce a file's bytes verbatim as
 `old_string`. It cannot reliably do that: #23 records it inventing
 `// close pipe and ignore exit status` and `return output;` against a file
 containing neither, four times running. The fixes in 7ae0272 — refuse a blind
@@ -101,7 +101,7 @@ The function-calling cookbook: *map function names and closed-set arguments to
 Choice questions.* Design rule: free text goes to the generation model;
 everything closed-set is a Choice.
 
-Which file to read next is a **closed set** — the repository listing. Bender
+Which file to read next is a **closed set** — the repository listing. Bendcoder
 instead asks an LLM for a path and then mines the reply for one, because the
 model prepends its reasoning:
 
@@ -115,7 +115,7 @@ checks. A Choice over the paths deletes the problem and the function.
 Design rule 3: *send only the relevant state, structured. Prefer a JSON object
 with named fields. Point a question at a field with a backticked path.*
 
-Bender concatenates everything into one string with `[label]:` headers, and
+Bendcoder concatenates everything into one string with `[label]:` headers, and
 hand-escapes it into JSON in three places. Jev accepts an object. The selector
 design's shape:
 
@@ -133,7 +133,7 @@ that a structured state is what Jev is designed to read.
 
 The `index` field matters on its own. *Retrieval the model must ask for is not
 called — inject it.* Coder measured host-injected context beating
-model-requested retrieval by about 18 points. Bender has `tool_grep` and a
+model-requested retrieval by about 18 points. Bendcoder has `tool_grep` and a
 repository listing and makes the model ask.
 
 ### 5. Four questions where a dozen cost almost nothing
@@ -181,7 +181,7 @@ Design rules 7 and 8: *route on probability and confidence with thresholds
 tuned on your own labeled data, and keep questions and thresholds in one
 reviewable place.*
 
-Bender's live thresholds are `noul < 0.60` in one guardrail and
+Bendcoder's live thresholds are `noul < 0.60` in one guardrail and
 `step >= max_steps - 1` in another, inline in the dispatch. Nothing records why
 0.60. Nothing was measured.
 
@@ -192,7 +192,7 @@ share one path and no gate.
 ### 8. No retry on 429 or 529
 
 The contract defines `429` (rate limited) and `529` (overloaded) as retryable
-and returns `retry-after-ms`. Bender's `curl` has no retry and no backoff; a
+and returns `retry-after-ms`. Bendcoder's `curl` has no retry and no backoff; a
 429 becomes an empty answer, and `extract_choice` returns `""`, which falls
 through the dispatch chain to `generate_answer`. A rate limit currently
 presents as a confident decision to generate.
@@ -205,7 +205,7 @@ Most of the above lands on the Bend side, and pleasingly so:
 
 - `agent_primitives.bend` already has `Question`, `OptionPair`, `NoulQ`,
   `ChoiceQ` and `ScoreQ` types and builds the payload from them. That is
-  already the "one reviewable module" rule 8 asks for. `bender_agent.c` builds
+  already the "one reviewable module" rule 8 asks for. `bendcoder_agent.c` builds
   the same JSON by hand with `fputs` and a second escaper. **The question set
   belongs in Bend, once.**
 - A Choice over line ids or over paths is a `ChoiceQ` whose options come from a

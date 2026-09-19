@@ -4,7 +4,7 @@
 #
 #   ./delegate-batch.sh 34 11 13 19 32
 #
-# Each issue gets a worktree under ../bender-wt/issue-<n> on its own branch.
+# Each issue gets a worktree under ../bendcoder-wt/issue-<n> on its own branch.
 # Nothing is committed or merged: the worktrees are left in place with the
 # changes in them, and the summary says which ones pass ./run_tests.sh. Review
 # and merge deliberately.
@@ -26,7 +26,7 @@ if [ -n "$(git status --porcelain)" ]; then
   exit 1
 fi
 
-WT_ROOT="$(cd .. && pwd)/bender-wt"
+WT_ROOT="$(cd .. && pwd)/bendcoder-wt"
 mkdir -p "$WT_ROOT"
 BASE="$(git rev-parse --abbrev-ref HEAD)"
 

@@ -4,7 +4,7 @@ import ./guard.bend as G
 # ==============================================================================
 # The Path Guard, as Laws
 # ==============================================================================
-# in_repo is the Bend port of path_is_in_repo (bender_agent.c) — the check
+# in_repo is the Bend port of path_is_in_repo (bendcoder_agent.c) — the check
 # that keeps a self-editing agent inside its own repository. The def itself
 # lives in guard.bend so the agent loop calls the same guard these laws
 # quantify over. Where test_tools.c backs the C guard with five examples,

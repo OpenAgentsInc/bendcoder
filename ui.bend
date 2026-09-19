@@ -4,7 +4,7 @@ import Base
 # Terminal UI: colours and rendering
 # ==============================================================================
 # Every escape sequence, rule and banner the loop prints lives here, so
-# bender_agent.bend reads as the loop and nothing else. Pure string helpers
+# bendcoder_agent.bend reads as the loop and nothing else. Pure string helpers
 # plus the one banner IO.
 # ==============================================================================
 
@@ -32,5 +32,5 @@ def rule() -> String:
 def render_banner() -> IO(Unit):
   do IO<Unit>:
     u1 : Unit <- IO.print(color_cyan("================================================================================"))
-    u2 : Unit <- IO.print(color_bold("  [BENDER] Autonomous Coding Agent (Bend2 + TypeSafe + OpenRouter)"))
+    u2 : Unit <- IO.print(color_bold("  [BENDCODER] Autonomous Coding Agent (Bend2 + TypeSafe + OpenRouter)"))
     IO.print(color_cyan("================================================================================"))

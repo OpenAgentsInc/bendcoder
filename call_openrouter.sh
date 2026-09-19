@@ -24,8 +24,8 @@ echo "Sending request to OpenRouter ($MODEL, backup: $BACKUP_MODEL)..."
 curl -s -X POST https://openrouter.ai/api/v1/chat/completions \
   -H "Authorization: Bearer $KEY" \
   -H "Content-Type: application/json" \
-  -H "HTTP-Referer: https://github.com/OpenAgentsInc/bender" \
-  -H "X-Title: Bender Agent" \
+  -H "HTTP-Referer: https://github.com/OpenAgentsInc/bendcoder" \
+  -H "X-Title: Bendcoder Agent" \
   -d "{
     \"model\": \"$MODEL\",
     \"models\": [\"$MODEL\", \"$BACKUP_MODEL\"],

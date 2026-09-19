@@ -127,7 +127,7 @@ static Term sys_tool_pack(Env e, IoWork* w) {
 static void sys_read_file_worker(IoWork* w) {
   char* path = w->data;
   size_t len = 0;
-  char* content = bender_slurp(path, &len);
+  char* content = bendcoder_slurp(path, &len);
   free(path);
 
   if (!content) {
@@ -321,11 +321,11 @@ static void __attribute__((constructor)) sys_grep_file_use(void) {
 // sys.exists(path: String) -> IO(String)
 // "true" or "false" over the string-only boundary — the loop's blind-edit
 // guard asks it before refusing an edit to a file never read, the way
-// bender_agent.c asks bender_exists.
+// bendcoder_agent.c asks bendcoder_exists.
 // -----------------------------------------------------------------------------
 static void sys_exists_worker(IoWork* w) {
   char* path = w->data;
-  int ok = bender_exists(path);
+  int ok = bendcoder_exists(path);
   free(path);
   w->data = strdup(ok ? "true" : "false");
   w->size = strlen(w->data);
